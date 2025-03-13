@@ -8,12 +8,14 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
         step((generator = generator.apply(thisArg, _arguments || [])).next());
     });
 };
-var _a, _b, _c;
+var _a, _b;
 var buildTimeStamp;
 var isDedicatedServer = (typeof window == 'undefined');
 console.log(isDedicatedServer ? "\u001b[32mrunning on server" : "\u001b[32mrunning on client");
 if (isDedicatedServer)
     console.log("\u001b[35mCtrl + C to shutdown server\u001b[37m");
+if (isDedicatedServer)
+    console.log("\u001b[35mPress '/' to run commands\u001b[37m");
 var mat4;
 if (isDedicatedServer)
     mat4 = require('gl-matrix').mat4;
@@ -26,6 +28,21 @@ if (isDedicatedServer)
 var vec4;
 if (isDedicatedServer)
     vec4 = require('gl-matrix').vec4;
+var readline;
+if (isDedicatedServer)
+    readline = require('readline');
+var readline_promises;
+if (isDedicatedServer)
+    readline_promises = require('readline/promises');
+var ws;
+if (isDedicatedServer)
+    ws = require('ws');
+var fs;
+if (isDedicatedServer)
+    fs = require('fs');
+var path;
+if (isDedicatedServer)
+    path = require('path');
 class vec2Util {
     static add(out, src, x, y = x) {
         return vec2.add(out, src, vec2.fromValues(x, y));
@@ -100,11 +117,14 @@ class LogColor {
     constructor(code) {
         this.code = code;
     }
-    static insert(color, string, start = 0, end = string.length) {
-        const temp = Util.stringInsert(string, color.code, start);
+    static insert(color, message, start = 0, end = message.length) {
+        const temp = Util.stringInsert(message, color.code, start);
         end = Math.max(start, end);
         end += color.code.length;
         return Util.stringInsert(temp, LogColor.WHITE.code, end);
+    }
+    static log(color, message) {
+        console.log(color.code + message + LogColor.WHITE.code);
     }
 }
 LogColor.BLACK = new LogColor("\u001b[30m");
@@ -153,7 +173,7 @@ class SeededRandom {
         const c = 1013904223;
         const m = Math.pow(2, 32);
         this.seed = (a * this.seed + c) % m;
-        return this.seed / m;
+        return Math.abs(this.seed / m);
     }
     // 座標 (x, y) をもとにシードを生成
     static generateSeed(...nums) {
@@ -232,10 +252,10 @@ class TextureSizeAndDrawSize {
 }
 class TexturesRegistry extends Map {
     get(key) {
-        var _d;
+        var _c;
         if (this.fallbackTexture == null)
             throw Error("called texture before initraize");
-        return (_d = super.get(key)) !== null && _d !== void 0 ? _d : this.fallbackTexture;
+        return (_c = super.get(key)) !== null && _c !== void 0 ? _c : this.fallbackTexture;
     }
     setFallBackTexture(texture) {
         this.fallbackTexture = texture;
@@ -512,6 +532,229 @@ class Cube {
         return textureIndices;
     }
 }
+class EntityCubeTransFactor {
+}
+class EntityCubeTransFactorTranslate {
+    constructor(transX, transY, transZ, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        this.transX = transX;
+        this.transY = transY;
+        this.transZ = transZ;
+        this.pivotX = pivotX;
+        this.pivotY = pivotY;
+        this.pivotZ = pivotZ;
+    }
+    transrate(matrix) {
+        const copyMatrix = mat4.copy(mat4.create(), matrix);
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(this.pivotX, this.pivotY, this.pivotZ));
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(this.transX, this.transY, this.transZ));
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(-this.pivotX, -this.pivotY, -this.pivotZ));
+        return copyMatrix;
+    }
+}
+class EntityCubeTransFactorScale {
+    constructor(scaleX, scaleY, scaleZ, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        this.scaleX = scaleX;
+        this.scaleY = scaleY;
+        this.scaleZ = scaleZ;
+        this.pivotX = pivotX;
+        this.pivotY = pivotY;
+        this.pivotZ = pivotZ;
+    }
+    transrate(matrix) {
+        const copyMatrix = mat4.copy(mat4.create(), matrix);
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(this.pivotX, this.pivotY, this.pivotZ));
+        mat4.scale(copyMatrix, copyMatrix, vec3.fromValues(this.scaleX, this.scaleY, this.scaleZ));
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(-this.pivotX, -this.pivotY, -this.pivotZ));
+        return copyMatrix;
+    }
+}
+class EntityCubeTransFactorRotate {
+    constructor(pitch, yaw, roll, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        this.pitch = pitch;
+        this.yaw = yaw;
+        this.roll = roll;
+        this.pivotX = pivotX;
+        this.pivotY = pivotY;
+        this.pivotZ = pivotZ;
+    }
+    transrate(matrix) {
+        const copyMatrix = mat4.copy(mat4.create(), matrix);
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(this.pivotX, this.pivotY, this.pivotZ));
+        mat4.rotateZ(copyMatrix, copyMatrix, this.roll);
+        mat4.rotateY(copyMatrix, copyMatrix, this.yaw);
+        mat4.rotateX(copyMatrix, copyMatrix, this.pitch);
+        mat4.translate(copyMatrix, copyMatrix, vec3.fromValues(-this.pivotX, -this.pivotY, -this.pivotZ));
+        return copyMatrix;
+    }
+}
+class EntityCubeRoot {
+    constructor() {
+        this.children = new Array;
+    }
+    add(child) {
+        this.children.push(child);
+        return child;
+    }
+    getDescendants() {
+        const descendants = new Array;
+        for (const child of this.children) {
+            descendants.push(child, ...child.getDescendants());
+        }
+        return descendants;
+    }
+}
+class EntityCube extends EntityCubeRoot {
+    constructor(x0, y0, z0, x1, y1, z1) {
+        super();
+        this.x0 = x0;
+        this.y0 = y0;
+        this.z0 = z0;
+        this.x1 = x1;
+        this.y1 = y1;
+        this.z1 = z1;
+        this.transFactors = new Array;
+        this.parent = null;
+    }
+    setTexture(width, height, posX, posY, mirrored = false) {
+        this.texture = TextureCube.of(width, height, posX, posY, this.x1 - this.x0, this.y1 - this.y0, this.z1 - this.z0, mirrored);
+        return this;
+    }
+    translate(transX, transY, transZ, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        this.transFactors.push(new EntityCubeTransFactorTranslate(transX, transY, transZ, pivotX, pivotY, pivotZ));
+        return this;
+    }
+    scale(scaleX, scaleY, scaleZ, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        this.transFactors.push(new EntityCubeTransFactorScale(scaleX, scaleY, scaleZ, pivotX, pivotY, pivotZ));
+        return this;
+    }
+    add(child) {
+        child.parent = this;
+        super.add(child);
+        return child;
+    }
+    rotate(pitchDeg, yawDeg, rollDeg, pivotX = 0, pivotY = 0, pivotZ = 0) {
+        const pitchRad = MathUtil.toRadian(pitchDeg);
+        const yawRad = MathUtil.toRadian(yawDeg);
+        const rollRad = MathUtil.toRadian(rollDeg);
+        this.transFactors.push(new EntityCubeTransFactorRotate(pitchRad, yawRad, rollRad, pivotX, pivotY, pivotZ));
+        return this;
+    }
+    getTransfactorsWithParent() {
+        const transFactors = new Array(...this.transFactors);
+        let parent = this.parent;
+        while (parent != null) {
+            transFactors.unshift(...parent.transFactors);
+            parent = parent.parent;
+        }
+        return transFactors;
+    }
+    getVertices() {
+        const vertices = new Array;
+        const { x0: x0, y0: y0, z0: z0, x1: x1, y1: y1, z1: z1 } = this;
+        // 前面
+        vertices.push(vec3.fromValues(x0, y0, z1), vec3.fromValues(x1, y0, z1), vec3.fromValues(x1, y1, z1), vec3.fromValues(x0, y1, z1));
+        // 背面
+        vertices.push(vec3.fromValues(x0, y0, z0), vec3.fromValues(x0, y1, z0), vec3.fromValues(x1, y1, z0), vec3.fromValues(x1, y0, z0));
+        // 上面
+        vertices.push(vec3.fromValues(x0, y1, z0), vec3.fromValues(x0, y1, z1), vec3.fromValues(x1, y1, z1), vec3.fromValues(x1, y1, z0));
+        // 下面
+        vertices.push(vec3.fromValues(x0, y0, z0), vec3.fromValues(x1, y0, z0), vec3.fromValues(x1, y0, z1), vec3.fromValues(x0, y0, z1));
+        // 右側面
+        vertices.push(vec3.fromValues(x1, y0, z0), vec3.fromValues(x1, y1, z0), vec3.fromValues(x1, y1, z1), vec3.fromValues(x1, y0, z1));
+        // 左側面
+        vertices.push(vec3.fromValues(x0, y0, z0), vec3.fromValues(x0, y0, z1), vec3.fromValues(x0, y1, z1), vec3.fromValues(x0, y1, z0));
+        // Apply transformations
+        let matrix = mat4.create();
+        for (const transFactor of this.getTransfactorsWithParent()) {
+            matrix = transFactor.transrate(matrix);
+        }
+        for (let i = 0; i < vertices.length; i++) {
+            vec3.transformMat4(vertices[i], vertices[i], matrix);
+        }
+        // faster version of vertices.flatMap(vertex => [...vertex]);
+        return vertices.reduce((acc, vertex) => {
+            acc.push(vertex[0], vertex[1], vertex[2]);
+            return acc;
+        }, []);
+    }
+    getTextureUVs() {
+        const textureCoordinates = new Array;
+        if (this.texture == null)
+            return textureCoordinates;
+        const defUV = new TextureUV(0, 0, 1, 1);
+        const { x0: x0, y0: y0, z0: z0, x1: x1, y1: y1, z1: z1 } = this;
+        const { front: front, back: back, top: top, bottom: bottom, right: right, left: left } = this.texture;
+        const isRepeatTexture = this instanceof CubeTile; // deprecated
+        let xs = 1;
+        let ys = 1;
+        let zs = 1;
+        if (isRepeatTexture) {
+            xs = x1 - x0;
+            ys = y1 - y0;
+            zs = z1 - z0;
+        }
+        const textures = EntityCube.textureIDs;
+        for (const index in textures) {
+            if (textures[index] == -1)
+                continue;
+            switch (+index) {
+                case 0:
+                    // 前面
+                    const uv0 = front == null || isRepeatTexture ? defUV : front.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv0.x0, -uv0.y1 * ys, uv0.x1 * xs, -uv0.y1 * ys, uv0.x1 * xs, -uv0.y0, uv0.x0, -uv0.y0);
+                    break;
+                case 1:
+                    // 背面
+                    const uv1 = back == null || isRepeatTexture ? defUV : back.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv1.x1 * xs, -uv1.y1 * ys, uv1.x1 * xs, -uv1.y0, uv1.x0, -uv1.y0, uv1.x0, -uv1.y1 * ys);
+                    break;
+                case 2:
+                    // 上面
+                    const uv2 = top == null || isRepeatTexture ? defUV : top.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv2.x1 * xs, -uv2.y1 * zs, uv2.x1 * xs, -uv2.y0, uv2.x0, -uv2.y0, uv2.x0, -uv2.y1 * zs);
+                    break;
+                case 3:
+                    // 下面
+                    const uv3 = bottom == null || isRepeatTexture ? defUV : bottom.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv3.x0, -uv3.y1 * zs, uv3.x1 * xs, -uv3.y1 * zs, uv3.x1 * xs, -uv3.y0, uv3.x0, -uv3.y0);
+                    break;
+                case 4:
+                    // 右面
+                    const uv4 = right == null || isRepeatTexture ? defUV : right.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv4.x1 * zs, -uv4.y1 * ys, uv4.x1 * zs, -uv4.y0, uv4.x0, -uv4.y0, uv4.x0, -uv4.y1 * ys);
+                    break;
+                case 5:
+                    // 左面
+                    const uv5 = left == null || isRepeatTexture ? defUV : left.getUV0to1(this.texture.width, this.texture.height);
+                    textureCoordinates.push(uv5.x0, -uv5.y1 * ys, uv5.x1 * zs, -uv5.y1 * ys, uv5.x1 * zs, -uv5.y0, uv5.x0, -uv5.y0);
+                    break;
+            }
+        }
+        return textureCoordinates;
+    }
+    getTextureVarious() {
+        const textureVarious = new Array;
+        const textures = EntityCube.textureIDs;
+        for (const texture of textures) {
+            if (texture == -1)
+                continue;
+            textureVarious.push(texture, 0, texture, 0, texture, 0, texture, 0);
+        }
+        return textureVarious;
+    }
+    getTextureIndices(offset) {
+        const textureIndices = new Array;
+        const textures = EntityCube.textureIDs;
+        for (const texture of textures) {
+            if (texture == -1)
+                continue;
+            textureIndices.push(...[0, 1, 2, 0, 2, 3].map(value => value + offset));
+            offset += 4;
+        }
+        return textureIndices;
+    }
+}
+EntityCube.textureIDs = [0, 0, 0, 0, 0, 0];
 class TextureUV {
     constructor(x0, y0, x1, y1) {
         this.x0 = x0;
@@ -816,9 +1059,9 @@ class AbsEntitiesList extends Array {
     copy() {
         return this.copyWithin(0, 0);
     }
-    hurtAll(damage, attacker, gameIn) {
+    hurtAll(damage, attacker) {
         let count = 0;
-        this.forEach(e => e != attacker && e.isAlive() && e instanceof EntityLiving && (count += e.hurt(damage, attacker, gameIn) ? 1 : 0));
+        this.forEach(e => e != attacker && e.isAlive() && e instanceof EntityHurtable && (count += e.hurt(damage, attacker) ? 1 : 0));
         return count > 0;
     }
 }
@@ -1149,7 +1392,7 @@ class PacketHandler {
         PacketHandler.ServerRegistry.register(0xf1, PacketToServerPlayerEventSync);
         PacketHandler.ServerRegistry.register(0xf8, PacketToServerLevelDataSync);
         PacketHandler.ServerRegistry.register(0xf9, PacketToServerLevelEventSync);
-        PacketHandler.ClientRegistry.register(0x00, PacketToClientLogin);
+        PacketHandler.ClientRegistry.register(0x00, PacketToClientPlayerCreate);
         PacketHandler.ClientRegistry.register(0x01, PacketToClientEntityCreate);
         PacketHandler.ClientRegistry.register(0x02, PacketToClientOtherPlayerCreate);
         PacketHandler.ClientRegistry.register(0x03, PacketToClientEntityDiscard);
@@ -1182,11 +1425,18 @@ class PacketToServerPlayerJoin {
         this.userName = DataViewUtil.readStringExtend(view);
     }
     handle(ctx) {
-        const serverIn = ctx.getGame();
-        const serverClient = ctx.getServerClient();
-        // serverClient.userName = this.userName;
-        var entityP = serverIn.spawnPlayer(serverClient, this.userName);
-        console.log(`player (${entityP.userName}) uuid:${entityP.uuid} was joined`);
+        return __awaiter(this, void 0, void 0, function* () {
+            const serverIn = ctx.getGame();
+            const serverClient = ctx.getServerClient();
+            // serverClient.userName = this.userName;
+            let player = new EntityPlayerServer(serverIn, serverClient);
+            player.userName = this.userName;
+            player.uuid = yield UUIDUtil.generateUUIDFromString(this.userName);
+            serverIn.savehandler.loadAndInitPlayer(player);
+            serverClient.entityPlayer = player;
+            player = serverIn.spawnPlayer(serverClient, player);
+            console.log(`player (${player.userName}) uuid:${player.uuid} was joined`);
+        });
     }
 }
 class PacketToServerPlayerRespawn {
@@ -1203,7 +1453,10 @@ class PacketToServerPlayerRespawn {
         const serverIn = ctx.getGame();
         const serverClient = ctx.getServerClient();
         const player = serverClient.entityPlayer;
-        serverIn.spawnPlayer(serverClient, player === null || player === void 0 ? void 0 : player.userName);
+        if (serverIn.entities.hasUUID(player.uuid))
+            player.discard();
+        player.health.set(player.getMaxHealth());
+        serverIn.spawnPlayer(serverClient, player);
     }
 }
 class PacketToServerPlayerMove {
@@ -1211,6 +1464,7 @@ class PacketToServerPlayerMove {
         this.posX = posX;
         this.posY = posY;
         this.posZ = posZ;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeFloat64(this.posX);
@@ -1227,13 +1481,13 @@ class PacketToServerPlayerMove {
         this.posZ = view.readFloat64();
     }
     handle(ctx) {
-        var _d;
+        var _c;
         const serverIn = ctx.getGame();
         const serverClient = ctx.getServerClient();
         var entity = serverClient.entityPlayer;
         if (entity == null)
             throw new PacketException("client entity is invalid");
-        const userName = entity instanceof EntityPlayerServer ? (_d = entity.userName) !== null && _d !== void 0 ? _d : "???" : "???";
+        const userName = entity instanceof EntityPlayerServer ? (_c = entity.userName) !== null && _c !== void 0 ? _c : "???" : "???";
         if (!isFinite(this.posX) || !isFinite(this.posY) || !isFinite(this.posZ)) {
             // server.kick("invalid movement", client)
             throw new PacketException(`player (${userName}) uuid:${entity.uuid} was invalid movement (x:${this.posX}, y:${this.posY}, z:${this.posZ})`);
@@ -1258,13 +1512,14 @@ class PacketToServerPlayerMove {
         if (wasInvalidMovement)
             serverIn.send(new PacketToClientEntityMove(entity.uuid, entity.posX(), entity.posY(), entity.posZ()), serverClient);
         if (entity instanceof EntityPlayer)
-            entity.triggerOnPlayerMove(serverIn);
+            entity.triggerOnPlayerMove();
     }
 }
 class PacketToServerPlayerDataSync {
     constructor(propertyId, data) {
         this.propertyId = propertyId;
         this.data = data;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1299,6 +1554,7 @@ class PacketToServerPlayerEventSync {
         this.propertyId = propertyId;
         this.dataArr = dataArr;
         this.dataLength = dataLength;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1340,6 +1596,7 @@ class PacketToServerLevelDataSync {
     constructor(propertyId, data) {
         this.propertyId = propertyId;
         this.data = data;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1371,6 +1628,7 @@ class PacketToServerLevelEventSync {
         this.dataArr = dataArr;
         this.posArr = posArr;
         this.dataLength = dataLength;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1489,7 +1747,7 @@ class PacketToClientEntityCreate extends PacketToClientEntityCreateBase {
         else {
             const entity = new (EntityType.getById(this.entityType))(clientIn);
             this.initEntity(entity);
-            entity.spawn(clientIn);
+            entity.spawn();
         }
     }
 }
@@ -1502,18 +1760,21 @@ class PacketToClientOtherPlayerCreate extends PacketToClientEntityCreateBase {
         else {
             const player = new EntityPlayerOtherClient(clientIn);
             this.initEntity(player);
-            player.spawn(clientIn);
+            player.spawn();
         }
     }
 }
-class PacketToClientLogin extends PacketToClientEntityCreateBase {
+class PacketToClientPlayerCreate extends PacketToClientEntityCreateBase {
     handle(ctx) {
         const clientIn = ctx.getGame();
-        const player = new EntityPlayerClient(clientIn).spawn(clientIn);
+        const player = new EntityPlayerClient(clientIn).spawn();
         this.initEntity(player);
         clientIn.entityPlayer = player;
-        clientIn.scene = SceneType.MAIN;
+        clientIn.scene = SceneType.IN_GAME;
         clientIn.hasLoadFinished = true;
+        if (clientIn.currentGui instanceof GuiDeath) {
+            clientIn.openGui(null);
+        }
     }
 }
 class PacketToClientEntityDiscard {
@@ -1535,7 +1796,7 @@ class PacketToClientEntityDiscard {
         var entity = clientIn.entities.getByUUID(this.entityUUID);
         if (entity == null)
             return;
-        entity.discard(clientIn);
+        entity.discard();
     }
 }
 class PacketToClientUpdatePlayerData {
@@ -1633,6 +1894,7 @@ class PacketToClientEntityVelocity {
         this.velocityX = velocityX;
         this.velocityY = velocityY;
         this.velocityZ = velocityZ;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         DataViewUtil.writeUUIDExtend(view, this.entityUUID);
@@ -1686,6 +1948,7 @@ class PacketToClientEntityDataSync {
         this.entityUUID = entityUUID;
         this.propertyId = propertyId;
         this.data = data;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         DataViewUtil.writeUUIDExtend(view, this.entityUUID);
@@ -1723,6 +1986,7 @@ class PacketToClientEntityEventSync {
         this.propertyId = propertyId;
         this.dataArr = dataArr;
         this.dataLength = dataLength;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         DataViewUtil.writeUUIDExtend(view, this.entityUUID);
@@ -1764,6 +2028,7 @@ class PacketToClientLevelDataSync {
     constructor(propertyId, data) {
         this.propertyId = propertyId;
         this.data = data;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1795,6 +2060,7 @@ class PacketToClientLevelEventSync {
         this.dataArr = dataArr;
         this.posArr = posArr;
         this.dataLength = dataLength;
+        this.shouldDelayPacket = true;
     }
     getMessage(view) {
         view.writeInt8(this.propertyId);
@@ -1856,14 +2122,16 @@ class Game {
     tickMain() {
         // console.log(this.entities.length)
         for (const entity of this.entities) {
-            entity.tick(this);
-            entity.checkMovePacket(this);
+            entity.tick();
+            entity.checkMovePacket();
         }
         this.levelSyncManager.checkSendMain(this, this);
         this.gameTicks++;
     }
     init() {
-        this.entities = new EntitiesList;
+        return __awaiter(this, void 0, void 0, function* () {
+            this.entities = new EntitiesList;
+        });
     }
     onCrash(e) { }
     crash(e) {
@@ -1885,6 +2153,8 @@ Game.LEFT_CLOSE_CODE = 3000;
 Game.EXCEPTION_CLOSE_CODE = 3001;
 Game.PACKET_EXCEPTION_CLOSE_CODE = 3002;
 Game.ENEMY_SPAWN_LIMIT_PER_PLAYERS = 20;
+// interface OnlineServerClient extends ServerClient, WebSocket {
+// }
 class OfflineServerClient {
     constructor(clientIn) {
         this.clientIn = clientIn;
@@ -1917,42 +2187,45 @@ class Server extends Game {
     }
     // debug: (msg: any) => any = () => { };
     onLineInit() {
-        const server = require('ws').Server;
-        const port = 8001;
-        const wss = new server({ port: port });
-        //const { v4: uuidv4 } = require('uuid');
-        console.log("serving at port" + port);
-        wss.on('connection', (client) => {
-            console.log('connected!');
-            client.on('message', (msg) => this.onRecievedPacket(Util.bufferToArrayBuffer(msg), client));
-            client.on('close', (code, reason) => {
-                this.disconnectMain(client.entityPlayer);
-                console.log(`disconnected! code: ${code}, reason: ${reason}`);
+        return __awaiter(this, void 0, void 0, function* () {
+            const server = ws.Server;
+            const port = 8001;
+            const wss = new server({ port: port });
+            console.log("serving at port" + port);
+            wss.on('connection', (client) => {
+                console.log('connected!');
+                client.on('message', (msg) => this.onRecievedPacket(Util.bufferToArrayBuffer(msg), client));
+                client.on('close', (code, reason) => {
+                    this.disconnectMain(client.entityPlayer);
+                    console.log(`disconnected! code: ${code}, reason: ${reason}`);
+                });
+                this.playerJoinPreInit(client);
+                // setInterval(e => console.log(client.entityPlayer.uuid), 1000)
             });
-            this.playerJoinPreInit(client);
-            // setInterval(e => console.log(client.entityPlayer.uuid), 1000)
+            this.kickAll = (code = 1000, reason) => wss.clients.forEach((client) => this.kick(client, code, reason));
+            this.kick = (client, code = 1000, reason) => client.close(code, reason !== null && reason !== void 0 ? reason : "");
+            this.sendRaw = (msg, client) => msg != null && client.send(msg);
+            this.send = (packet, client) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer, client);
+            this.sendAll = (packet) => wss.clients.forEach((client) => this.send(packet, client));
+            this.sendAllWithFilter = (packet, filter) => wss.clients.forEach((client) => filter(client, this) ? this.send(packet, client) : null);
+            this.sendWithOut = (packet, ignoreClient) => wss.clients.forEach((client) => client !== ignoreClient ? this.send(packet, client) : false);
+            // this.getClients = () => wss.clients.forEach((client: ServerClient, index: number) => console.log(`${index}:${client.userId}`));
+            // this.debug = (msg) => wss.clients.forEach((client: { userId: any; }, index: any) => console.log(`${index}:${client.userId}`));
+            yield this.init();
         });
-        this.kickAll = (code = 1000, reason) => wss.clients.forEach((client) => this.kick(client, code, reason));
-        this.kick = (client, code = 1000, reason) => client.close(code, reason !== null && reason !== void 0 ? reason : "");
-        this.sendRaw = (msg, client) => msg != null && client.send(msg);
-        this.send = (packet, client) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer, client);
-        this.sendAll = (packet) => wss.clients.forEach((client) => this.send(packet, client));
-        this.sendAllWithFilter = (packet, filter) => wss.clients.forEach((client) => filter(client, this) ? this.send(packet, client) : null);
-        this.sendWithOut = (packet, ignoreClient) => wss.clients.forEach((client) => client !== ignoreClient ? this.send(packet, client) : false);
-        this.getClients = () => wss.clients.forEach((client, index) => console.log(`${index}:${client.userId}`));
-        // this.debug = (msg) => wss.clients.forEach((client: { userId: any; }, index: any) => console.log(`${index}:${client.userId}`));
-        this.init();
     }
     offLineInit(client) {
-        this.kickAll = (code = 1000, reason) => this.kick(client, code, reason);
-        this.kick = (client, code = 1000, reason) => client.close(code, reason !== null && reason !== void 0 ? reason : "");
-        this.sendRaw = (msg, client) => msg != null && client.send(msg);
-        this.send = (packet, client) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer, client);
-        this.sendAll = (packet) => this.send(packet, client);
-        this.sendAllWithFilter = (packet, filter) => filter(client, this) ? this.send(packet, client) : null;
-        this.sendWithOut = (packet, ignoreClient) => { };
-        this.playerJoinPreInit(client);
-        this.init();
+        return __awaiter(this, void 0, void 0, function* () {
+            this.kickAll = (code = 1000, reason) => this.kick(client, code, reason);
+            this.kick = (client, code = 1000, reason) => client.close(code, reason !== null && reason !== void 0 ? reason : "");
+            this.sendRaw = (msg, client) => msg != null && client.send(msg);
+            this.send = (packet, client) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer, client);
+            this.sendAll = (packet) => this.send(packet, client);
+            this.sendAllWithFilter = (packet, filter) => filter(client, this) ? this.send(packet, client) : null;
+            this.sendWithOut = (packet, ignoreClient) => { };
+            this.playerJoinPreInit(client);
+            yield this.init();
+        });
     }
     onRecievedPacket(msg, client) {
         try {
@@ -1960,7 +2233,7 @@ class Server extends Game {
             // let msgObj = JSON.parse(msgRaw);
             const packet = this.packetHandler.createPacket(new DataViewExtend(msg));
             this.lastRecivedPacket = packet;
-            if (Core.debugPacketLog)
+            if (DebugUtil.debugPacketLog)
                 console.log("server recieve", msg, packet);
             this.packetHandler.tryHandle(packet, new PacketSideContext(this, client));
         }
@@ -1979,9 +2252,10 @@ class Server extends Game {
         // client.userName = null;
     }
     playerLeave(player) {
-        var _d;
+        var _c;
         // this.sendAll({ msgType: "entityLeave", entityUUID: entityUUID })
-        const result = (_d = player === null || player === void 0 ? void 0 : player.discard) === null || _d === void 0 ? void 0 : _d.call(player, this);
+        this.savehandler.savePlayer(player);
+        const result = (_c = player === null || player === void 0 ? void 0 : player.discard) === null || _c === void 0 ? void 0 : _c.call(player);
         if (result)
             console.log("removed: ", player.uuid);
         else
@@ -1991,11 +2265,26 @@ class Server extends Game {
         this.playerLeave(player);
     }
     init() {
-        if (!this.hasInited) {
-            this.tickInterValId = setInterval(this.tick.bind(this), 1000 / 20);
-            this.debugLogInterValId = setInterval(this.debugLog.bind(this), 1000);
-        }
-        this.hasInited = true;
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.savehandler.loadAll();
+            if (!this.hasInited) {
+                this.tickInterValId = setInterval(this.tick.bind(this), 1000 / 20);
+                this.debugLogInterValId = setInterval(this.debugLog.bind(this), 1000);
+            }
+            this.hasInited = true;
+        });
+    }
+    prepareShutdown() {
+        return __awaiter(this, void 0, void 0, function* () {
+            console.log('Server is shutting down...');
+            yield this.savehandler.saveAll();
+        });
+    }
+    // usually called when ctrl + C
+    shutDownServer(code) {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.prepareShutdown();
+        });
     }
     dispose() {
         clearInterval(this.tickInterValId);
@@ -2008,7 +2297,7 @@ class Server extends Game {
             // console.log("server tick")
             this.tickMain();
             this.packetHandler.tick();
-            if (this.gameTicks % 100 == 0 && Core.debugEntitySpawn)
+            if (this.gameTicks % 100 == 0 && DebugUtil.debugEntitySpawn)
                 this.tryEnemySpawn();
             this.updatePlayersData(undefined);
             // this.debug()
@@ -2021,29 +2310,44 @@ class Server extends Game {
         }
     }
     crash(e) {
-        super.crash(e);
-        this.onCrash(e);
-        this.dispose();
+        const _super = Object.create(null, {
+            crash: { get: () => super.crash }
+        });
+        return __awaiter(this, void 0, void 0, function* () {
+            _super.crash.call(this, e);
+            try {
+                this.onCrash(e);
+                yield this.prepareShutdown();
+            }
+            finally {
+                this.dispose();
+            }
+            process.exit(e instanceof Error ? e.message : e + "");
+        });
     }
     tryEnemySpawn() {
+        const spawnCircSize = 10;
         for (const player of this.entities.getPlayers()) {
-            const pos = MathUtil.random(0, 1);
-            const posX = Math.cos(pos * Math.PI) * 10 + player.pos[0];
-            const posZ = Math.sin(pos * Math.PI) * 10 + player.pos[2];
             if (!this.canSpawnEnemy())
                 continue;
             let tryCount = 0;
             while (tryCount < 10) {
                 tryCount++;
-                const entity = new EntityType.OCTOPUS(this);
-                if (entity.isOnWall())
+                const pos = MathUtil.random(0, 1);
+                const posX = Math.cos(pos * Math.PI) * spawnCircSize + player.pos[0];
+                const posZ = Math.sin(pos * Math.PI) * spawnCircSize + player.pos[2];
+                const entity = this.getSpawnEnemy(posX, posZ);
+                if (entity.isOnWall(posX, 0, posZ))
                     continue;
                 entity.setPos(posX, 0, posZ);
                 entity.setPowerLevelAndUpdate(MathUtil.getDistance2(0, 0, posX, posZ));
-                entity.spawn(this);
+                entity.spawn();
                 break;
             }
         }
+    }
+    getSpawnEnemy(posX, posZ) {
+        return new EntityType.OCTOPUS(this);
     }
     canSpawnEnemy() {
         return this.entities.getOnlyClass(EntityEnemy).length < this.getEnemySpawnLimit();
@@ -2051,22 +2355,20 @@ class Server extends Game {
     getEnemySpawnLimit() {
         return this.entities.getPlayers().length * Game.ENEMY_SPAWN_LIMIT_PER_PLAYERS;
     }
-    spawnPlayer(serverClient, userName) {
+    spawnPlayer(serverClient, player) {
         for (const entity of this.entities) {
             entity.sendCreatePacket(this, serverClient);
         }
-        const plUuid = crypto.randomUUID();
+        // const plUuid = player.uuid ?? crypto.randomUUID();
         // server.send({ msgType: "playerLogin", entityUUID: plUuid }, client);
-        var entityP = new EntityPlayerServer(this, serverClient);
-        const spawnPos = entityP.getSpawnPoint(this);
-        entityP.uuid = plUuid;
-        entityP.userName = userName;
-        entityP.setPos(spawnPos[0], spawnPos[1], spawnPos[2]);
-        serverClient.entityPlayer = entityP;
-        this.send(new PacketToClientLogin(entityP), serverClient);
-        entityP.spawn(this);
+        // const spawnPos = player.getSpawnPoint(this);
+        // player.uuid = plUuid;
+        // player.setPos(spawnPos[0], spawnPos[1], spawnPos[2]);
+        serverClient.entityPlayer = player;
+        this.send(new PacketToClientPlayerCreate(player), serverClient);
+        player.spawn();
         this.updatePlayersData(serverClient);
-        return entityP;
+        return player;
     }
     debugLog() {
         // console.log(...this.entities.map(e => e.uuid));
@@ -2088,6 +2390,28 @@ class Server extends Game {
             }
         }
     }
+    command(command) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const args = command.split(" ");
+            switch (args[0]) {
+                case "help":
+                    console.log("help: show help");
+                    console.log("save: save all data");
+                    console.log("exit: exit server");
+                    break;
+                case "save":
+                    yield this.savehandler.saveAll();
+                    LogColor.log(LogColor.GREEN, "saved!");
+                    break;
+                case "exit":
+                    yield this.shutDownServer(0);
+                    break;
+                default:
+                    LogColor.log(LogColor.RED, "invalid command help to show all commands");
+                    break;
+            }
+        });
+    }
 }
 class IntegratedServer extends Server {
     constructor(client) {
@@ -2095,21 +2419,41 @@ class IntegratedServer extends Server {
         this.client = client;
     }
     onCrash(e) {
-        if (!this.client.wasCrashed)
-            this.client.crash(e);
+        try {
+            if (!this.client.wasCrashed)
+                this.client.crash(e);
+        }
+        finally {
+            super.onCrash(e);
+        }
     }
 }
 class DedicatedServer extends Server {
     onCrash(e) {
-        const msg = e instanceof Error ? e.message : e + "";
-        this.kickAll(Game.EXCEPTION_CLOSE_CODE, msg);
+        try {
+            const msg = e instanceof Error ? e.message : e + "";
+            this.kickAll(Game.EXCEPTION_CLOSE_CODE, msg);
+        }
+        finally {
+            super.onCrash(e);
+        }
+    }
+    shutDownServer(code) {
+        const _super = Object.create(null, {
+            shutDownServer: { get: () => super.shutDownServer }
+        });
+        return __awaiter(this, void 0, void 0, function* () {
+            yield _super.shutDownServer.call(this, code);
+            this.kickAll(1000, "Server is shutting down");
+            process.exit(code);
+        });
     }
 }
 // #region Client
 var SceneType;
 (function (SceneType) {
     SceneType[SceneType["TITLE"] = 1] = "TITLE";
-    SceneType[SceneType["MAIN"] = 2] = "MAIN";
+    SceneType[SceneType["IN_GAME"] = 2] = "IN_GAME";
     SceneType[SceneType["CONNECT"] = 3] = "CONNECT";
 })(SceneType || (SceneType = {}));
 class ClientOptions {
@@ -2137,6 +2481,7 @@ class Client extends Game {
         this.currentGui = null;
         this.screenSize = vec2.fromValues(0, 0);
         this.options = new ClientOptions;
+        this.focusedComponent = null;
         this.isOffline = false;
         this.integratedServer = null;
         this.shouldShowDisconnectScreen = false;
@@ -2154,47 +2499,52 @@ class Client extends Game {
         this.partialTicks = 0;
         this.userName = "satoshiinu";
         this.fov = 60;
-        this.cam = new Cam(enum_cam_type.MAIN);
-        this.camTitle = new Cam(enum_cam_type.TITLE);
+        this.camInGame = new CamInGame(this);
+        this.camTitle = new CamTitle(this);
         this.keyHandler = new KeyHandler();
         this.pointerHandler = new PointerHandler(this);
     }
+    ;
     onLineInit(url) {
-        this.isOffline = false;
-        const ws = new WebSocket(url);
-        this.shouldShowDisconnectScreen = true;
-        this.scene = SceneType.CONNECT;
-        ws.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () { return this.onRecievedPacket.call(this, yield Util.blobToArrayBuffer(msg.data)); });
-        // ws.onmessage = msg => console.log(msg)
-        ws.onclose = msg => {
-            console.log(`closed: code: ${msg.code}\nreason: ${msg.reason}`);
-            this.onDisconnect(msg.code, msg.reason);
-        };
-        ws.onerror = msg => {
-            // console.log("error: ", msg);
-            //this.openTitleScreen(true, `Connection Error: ${msg.code}\nreason: ${msg.reason}`);
-        };
-        this.sendRaw = (msg) => msg != null && ws.send(msg);
-        this.send = (packet) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer);
-        ws.onopen = () => {
-            this.playerJoinInit();
-        };
-        this.disconnect = (code = 1000, reason) => { ws.close(code, reason); this.openDisconnectScreen(code, reason); };
+        return __awaiter(this, void 0, void 0, function* () {
+            this.isOffline = false;
+            const ws = new WebSocket(url);
+            this.shouldShowDisconnectScreen = true;
+            this.scene = SceneType.CONNECT;
+            ws.onmessage = (msg) => __awaiter(this, void 0, void 0, function* () { return this.onRecievedPacket.call(this, yield Util.blobToArrayBuffer(msg.data)); });
+            // ws.onmessage = msg => console.log(msg)
+            ws.onclose = msg => {
+                console.log(`closed: code: ${msg.code}\nreason: ${msg.reason}`);
+                this.onDisconnect(msg.code, msg.reason);
+            };
+            ws.onerror = msg => {
+                // console.log("error: ", msg);
+                //this.openTitleScreen(true, `Connection Error: ${msg.code}\nreason: ${msg.reason}`);
+            };
+            this.sendRaw = (msg) => msg != null && ws.send(msg);
+            this.send = (packet) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer);
+            ws.onopen = () => {
+                this.playerJoinInit();
+            };
+            this.disconnect = (code = 1000, reason) => { ws.close(code, reason); this.openDisconnectScreen(code, reason); };
+        });
     }
     offLineInit() {
-        const server = new IntegratedServer(this); // オフライン用のサーバーを作成
-        this.isOffline = true;
-        this.integratedServer = server;
-        sr = server;
-        // debugRegisterFinalization(server, "server");
-        this.scene = SceneType.CONNECT;
-        const serverClient = new OfflineServerClient(this);
-        server.offLineInit(serverClient);
-        this.kick = (code, reason) => { var _d; this.openDisconnectScreen(code, reason); (_d = this.integratedServer) === null || _d === void 0 ? void 0 : _d.dispose(); };
-        this.sendRaw = (msg) => msg != null && server.onRecievedPacket(msg, serverClient);
-        this.send = (packet) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer);
-        this.disconnect = (code = 1000, reason) => { var _d; server.disconnectMain(serverClient.entityPlayer); (_d = this.integratedServer) === null || _d === void 0 ? void 0 : _d.dispose(); this.onDisconnect(code, reason); };
-        this.playerJoinInit();
+        return __awaiter(this, void 0, void 0, function* () {
+            const server = new IntegratedServer(this); // オフライン用のサーバーを作成
+            this.isOffline = true;
+            this.integratedServer = server;
+            sr = server;
+            // debugRegisterFinalization(server, "server");
+            this.scene = SceneType.CONNECT;
+            const serverClient = new OfflineServerClient(this);
+            yield server.offLineInit(serverClient);
+            this.kick = (code, reason) => { var _c; this.openDisconnectScreen(code, reason); (_c = this.integratedServer) === null || _c === void 0 ? void 0 : _c.shutDownServer(); };
+            this.sendRaw = (msg) => msg != null && server.onRecievedPacket(msg, serverClient);
+            this.send = (packet) => this.sendRaw(this.packetHandler.getJsonByPacket(packet).buffer);
+            this.disconnect = (code = 1000, reason) => { var _c; server.disconnectMain(serverClient.entityPlayer); (_c = this.integratedServer) === null || _c === void 0 ? void 0 : _c.shutDownServer(); this.onDisconnect(code, reason); };
+            this.playerJoinInit();
+        });
     }
     onDisconnect(code = 1000, reason = "") {
         if (this.shouldShowDisconnectScreen) {
@@ -2242,7 +2592,7 @@ class Client extends Game {
             // let msgObj = JSON.parse(msg);
             const packet = this.packetHandler.createPacket(new DataViewExtend(msg));
             this.lastRecivedPacket = packet;
-            if (Core.debugPacketLog)
+            if (DebugUtil.debugPacketLog)
                 console.log("client recieve", msg, packet);
             this.packetHandler.tryHandle(packet, new PacketSideContext(this));
         }
@@ -2258,12 +2608,26 @@ class Client extends Game {
         super.onPacketExceptionOrError(e);
         this.disconnect(Game.PACKET_EXCEPTION_CLOSE_CODE, e.msg);
     }
+    getCamInScene(scene = this.scene) {
+        switch (scene) {
+            case SceneType.TITLE:
+            case SceneType.CONNECT:
+                return this.camTitle;
+            case SceneType.IN_GAME:
+                return this.camInGame;
+        }
+    }
     render(now) {
         try {
             clientFlamePerf.Start();
             Renderer.updateFrame(this);
+            const cam = this.getCamInScene(this.scene);
+            if (DebugUtil.debugFreeCam)
+                cam.updateFreeCam(this, this.pointerMove);
+            else
+                cam.update(this.partialTicks);
             switch (this.scene) {
-                case SceneType.MAIN:
+                case SceneType.IN_GAME:
                     if (!this.hasLoadFinished)
                         break;
                     Renderer.renderInGame(this);
@@ -2286,45 +2650,31 @@ class Client extends Game {
     }
     tickMain() {
         for (const particle of this.particles) {
-            particle.tick(this);
+            particle.tick();
         }
         super.tickMain();
     }
     tick() {
-        var _d, _e, _f, _g;
+        var _c;
         try {
             clientTickPerf.Start();
+            this.keyHandle();
+            this.getCamInScene(this.scene).tick();
             switch (this.scene) {
-                case SceneType.MAIN:
+                case SceneType.IN_GAME:
                     if (!this.hasLoadFinished)
                         break;
                     this.tickMain();
                     this.packetHandler.tick();
                     this.deathCheck();
-                    this.cam.tick((_e = (_d = this.entityPlayer) === null || _d === void 0 ? void 0 : _d.pos) !== null && _e !== void 0 ? _e : vec3.fromValues(0, 0, 0), (_g = (_f = this.entityPlayer) === null || _f === void 0 ? void 0 : _f.rotation.get()) !== null && _g !== void 0 ? _g : 0);
-                    if (Core.debugFreeCam)
-                        this.debugFreeCam(this.pointerMove, this.cam);
+                    this.guiHud.tick();
                     break;
                 case SceneType.TITLE:
                 case SceneType.CONNECT:
-                    this.camTitle.tick(undefined, undefined);
-                    if (Core.debugFreeCam)
-                        this.debugFreeCam(this.pointerMove, this.camTitle);
                     break;
             }
-            this.keyHandler.tick();
-            while (this.keyHandler.keyTitle.consumeClick()) {
-                this.quit();
-            }
-            while (this.keyHandler.keyFreecam.consumeClick()) {
-                Core.debugFreeCam = !Core.debugFreeCam;
-            }
-            while (this.keyHandler.keyDebugAbout.consumeClick()) {
-                Core.debugtext = !Core.debugtext;
-            }
-            while (this.keyHandler.keyDebugModule.consumeClick()) {
-                this.send(new PacketToServerPlayerMove(NaN, NaN, NaN));
-            }
+            (_c = this.currentGui) === null || _c === void 0 ? void 0 : _c.tick();
+            this.guiDebug.tick();
             this.pointerMove = vec2.fromValues(0, 0);
             this.lastTickTime = +new Date;
             clientTickPerf.End();
@@ -2332,6 +2682,21 @@ class Client extends Game {
         catch (e) {
             console.warn("client tick error");
             this.crash(e);
+        }
+    }
+    keyHandle() {
+        this.keyHandler.tick();
+        while (this.keyHandler.keyTitle.consumeClick()) {
+            this.quit();
+        }
+        while (this.keyHandler.keyFreecam.consumeClick()) {
+            DebugUtil.debugFreeCam = !DebugUtil.debugFreeCam;
+        }
+        while (this.keyHandler.keyDebugAbout.consumeClick()) {
+            DebugUtil.debugtext = !DebugUtil.debugtext;
+        }
+        while (this.keyHandler.keyDebugModule.consumeClick()) {
+            // this.send(new PacketToServerPlayerMove(NaN, NaN, NaN));
         }
     }
     crash(e) {
@@ -2342,31 +2707,46 @@ class Client extends Game {
     onCrash(e) {
         if (this.integratedServer && !this.integratedServer.wasCrashed)
             this.integratedServer.crash(e);
+        alert("client was crashed!\n please check log at console");
     }
     init() {
-        super.init();
-        if (!this.hasInited) {
-            this.frameID = requestAnimationFrame(this.render.bind(this));
-            this.intervalID = setInterval(this.tick.bind(this), 1000 / 20);
-            const canvasClick = document.getElementById("canvasRender");
-            if (canvasClick == null || canvasClick instanceof HTMLCanvasElement == false)
-                throw Error("canvas not found");
-            const canvasRender = document.getElementById("canvasRender");
-            if (canvasRender == null || canvasRender instanceof HTMLCanvasElement == false)
-                throw Error("canvas not found");
-            this.gl = Renderer.canvasInit(canvasRender);
-            this.canvasClick = canvasClick;
-            this.pointerHandler.init(this.canvasClick);
-            this.updateScreenSize(canvasClick);
-            this.guiEventInit(canvasClick);
-        }
-        this.playersData = new Map;
-        this.entities = new EntitiesList;
-        this.guiHud = new GuiHud;
-        this.guiHud.initGui(this);
-        this.guiDebug = new GuiDebug;
-        this.guiDebug.initGui(this);
-        this.hasInited = true;
+        const _super = Object.create(null, {
+            init: { get: () => super.init }
+        });
+        return __awaiter(this, void 0, void 0, function* () {
+            _super.init.call(this);
+            if (!this.hasInited) {
+                this.frameID = requestAnimationFrame(this.render.bind(this));
+                this.intervalID = setInterval(this.tick.bind(this), 1000 / 20);
+                const canvasClick = document.getElementById("canvasRender");
+                if (canvasClick == null || canvasClick instanceof HTMLCanvasElement == false)
+                    throw Error("canvas not found");
+                const canvasRender = document.getElementById("canvasRender");
+                if (canvasRender == null || canvasRender instanceof HTMLCanvasElement == false)
+                    throw Error("canvas not found");
+                this.canvasClick = canvasClick;
+                this.canvasRender = canvasRender;
+                canvasRender.addEventListener("webglcontextlost", e => {
+                    console.warn("WebGL context lost! Trying to recover...");
+                    e.preventDefault(); // デフォルトの処理（復帰不可）を防ぐ
+                });
+                canvasRender.addEventListener("webglcontextrestored", e => {
+                    console.log(LogColor.insert(LogColor.GREEN, "WebGL context restored!"));
+                    this.gl = Renderer.canvasInit(canvasRender); // WebGL の初期化を再実行
+                });
+                this.gl = Renderer.canvasInit(canvasRender);
+                this.pointerHandler.init(this.canvasClick);
+                this.updateScreenSize(canvasClick);
+                this.guiEventInit(canvasClick);
+            }
+            this.playersData = new Map;
+            this.entities = new EntitiesList;
+            this.guiHud = new GuiHud;
+            this.guiHud.initGui(this);
+            this.guiDebug = new GuiDebug;
+            this.guiDebug.initGui(this);
+            this.hasInited = true;
+        });
     }
     deathCheck() {
         if (this.entityPlayer != null && !this.entityPlayer.isAlive())
@@ -2474,6 +2854,7 @@ class Client extends Game {
             if (client.currentGui != null)
                 client.currentGui.onMouseMoved(scaledMouse, e);
         }
+        GuiUtil.init(this);
     }
     handleLogin(msgObj) {
         this.tempPlayerUuid = msgObj.entityUUID;
@@ -2496,32 +2877,17 @@ class Client extends Game {
     getGuiScale() {
         return 6;
     }
-    debugFreeCam(camMove, cam) {
-        const speed = 1;
-        if (this.keyHandler.keyLeft.isDown)
-            cam.move(speed, 0, 0);
-        if (this.keyHandler.keyRight.isDown)
-            cam.move(-speed, 0, 0);
-        if (this.keyHandler.keyRise.isDown)
-            cam.move(0, speed, 0);
-        if (this.keyHandler.keyDescent.isDown)
-            cam.move(0, -speed, 0);
-        if (this.keyHandler.keyUp.isDown)
-            cam.move(0, 0, speed);
-        if (this.keyHandler.keyDown.isDown)
-            cam.move(0, 0, -speed);
-        cam.rotate(camMove[0], camMove[1]);
-    }
     openGui(gui) {
         if (gui != null)
             gui.initGui(this);
+        this.focusedComponent = null;
         this.currentGui = gui;
     }
     getDefaultScreen() {
         switch (this.scene) {
             case SceneType.TITLE:
                 return new GuiTitle();
-            case SceneType.MAIN:
+            case SceneType.IN_GAME:
                 return new GuiHud();
             case SceneType.CONNECT:
                 return new GuiTitle();
@@ -2529,14 +2895,14 @@ class Client extends Game {
     }
     spawnDeathParticle(pos, size) {
         for (let index = 0; index < 8; index++) {
-            const particle = MathUtil.randomInt(0, 2) == 0 ? new ParticleDeathSmokeSmall(pos, size) : new ParticleDeathSmoke(pos, size);
-            particle.spawn(this);
+            const particle = MathUtil.randomInt(0, 2) == 0 ? new ParticleDeathSmokeSmall(this, pos, size) : new ParticleDeathSmoke(this, pos, size);
+            particle.spawn();
         }
     }
     spawnProjectileHitParticle(pos, size) {
         for (let index = 0; index < 4; index++) {
-            const particle = new ParticleProjectileHit(vec3.add(vec3.create(), pos, vec3.random(vec3.create(), 0.5)), size);
-            particle.spawn(this);
+            const particle = new ParticleProjectileHit(this, vec3.add(vec3.create(), pos, vec3.random(vec3.create(), 0.5)), size);
+            particle.spawn();
         }
     }
 }
@@ -2553,7 +2919,8 @@ class KeyHandler {
         this.keyAttack = this.register(new KeyMapping("Space"));
         this.keyTitle = this.register(new KeyMapping("KeyP"));
         this.keyFreecam = this.register(new KeyMapping("KeyF"));
-        this.keyDebugAbout = this.register(new KeyMapping("KeyC"));
+        this.keyZoomout = this.register(new KeyMapping("KeyC"));
+        this.keyDebugAbout = this.register(new KeyMapping("KeyX"));
         this.keyDebugModule = this.register(new KeyMapping("KeyZ"));
     }
     tick() {
@@ -2627,7 +2994,7 @@ class PointerHandler {
         return (document.pointerLockElement === canvas);
     }
     lock(event) {
-        if (!Core.debugFreeCam)
+        if (!DebugUtil.debugFreeCam)
             return;
         const canvas = event.srcElement;
         canvas.requestPointerLock =
@@ -2644,65 +3011,17 @@ const enum_cam_type = {
     TITLE: Symbol(),
 };
 class Cam {
-    constructor(type) {
+    constructor(clientIn) {
         this.dir = vec3.fromValues(0, 0, 0); // pitch yaw roll
-        this.oldDir = vec3.fromValues(0, 0, 0);
         this.pos = vec3.fromValues(0, 0, 0);
-        this.oldPos = vec3.fromValues(0, 0, 0);
+        this.playerOldYaw = 0;
         this.playerYaw = 0;
-        this.type = enum_cam_type.MAIN;
-        this.type = type;
+        this.clientIn = clientIn;
     }
-    tick(pos, rotate) {
-        this.oldDir[0] = this.dir[0];
-        this.oldDir[1] = this.dir[1];
-        this.oldDir[2] = this.dir[2];
-        this.oldPos[0] = this.pos[0];
-        this.oldPos[1] = this.pos[1];
-        this.oldPos[2] = this.pos[2];
-        if (Core.debugFreeCam)
-            return;
-        switch (this.type) {
-            case enum_cam_type.MAIN:
-                if (pos == null)
-                    return;
-                if (rotate == null)
-                    return;
-                this.pos[0] = pos[0];
-                this.pos[1] = pos[1] + 10;
-                this.pos[2] = pos[2];
-                this.dir[0] = -89.9;
-                this.dir[1] = this.playerYaw;
-                break;
-            case enum_cam_type.TITLE:
-                this.pos[0] = 0.0;
-                this.pos[1] = 25.0;
-                this.pos[2] = 0.0;
-                this.dir[0] = -75.0;
-                this.dir[1] = (Date.now() / 100) % 360;
-                this.dir[2] = 0.0;
-                break;
-        }
+    update(partialTicks) {
     }
-    moveYawByPlayerVel(x, y, z, offset = 0) {
-        const degree = MathUtil.calcAngleDegrees(z, x) + offset;
-        if (degree < 0 && this.playerYaw > 90)
-            this.playerYaw -= 360;
-        if (degree > 90 && this.playerYaw < 0)
-            this.playerYaw += 360;
-        this.playerYaw += (degree - this.playerYaw) * 0.025;
-    }
-    getRenderPos(partialTicks) {
-        const x = MathUtil.lerp(partialTicks, this.oldPos[0], this.pos[0]);
-        const y = MathUtil.lerp(partialTicks, this.oldPos[1], this.pos[1]);
-        const z = MathUtil.lerp(partialTicks, this.oldPos[2], this.pos[2]);
-        return vec3.fromValues(x, y, z);
-    }
-    getRenderDir(partialTicks) {
-        const x = MathUtil.rotLerp(partialTicks, this.oldDir[0], this.dir[0]);
-        const y = MathUtil.rotLerp(partialTicks, this.oldDir[1], this.dir[1]);
-        const z = MathUtil.rotLerp(partialTicks, this.oldDir[2], this.dir[2]);
-        return vec3.fromValues(x, y, z);
+    tick() {
+        this.playerOldYaw = this.playerYaw;
     }
     move(x, y, z) {
         var radiansX = MathUtil.toRadian(this.dir[1] + 90);
@@ -2717,9 +3036,80 @@ class Cam {
         this.dir[2] = 0;
         this.dir[0] = MathUtil.clamp(-89, this.dir[0], 89);
     }
+    updateFreeCam(clientIn, camMove) {
+        const speed = 1;
+        if (clientIn.keyHandler.keyLeft.isDown)
+            this.move(speed, 0, 0);
+        if (clientIn.keyHandler.keyRight.isDown)
+            this.move(-speed, 0, 0);
+        if (clientIn.keyHandler.keyRise.isDown)
+            this.move(0, speed, 0);
+        if (clientIn.keyHandler.keyDescent.isDown)
+            this.move(0, -speed, 0);
+        if (clientIn.keyHandler.keyUp.isDown)
+            this.move(0, 0, speed);
+        if (clientIn.keyHandler.keyDown.isDown)
+            this.move(0, 0, -speed);
+        this.rotate(camMove[0], camMove[1]);
+    }
 }
 Cam.enumTypeMain = Symbol();
 Cam.enumTypeTitle = Symbol();
+class CamInGame extends Cam {
+    constructor() {
+        super(...arguments);
+        this.zoomOutAmount = 0;
+        this.zoomOutOldAmount = 0;
+        this.zoomoutMax = 5;
+        this.zoomoutMin = 0;
+    }
+    getYOffset(partialTicks) {
+        return 10 + MathUtil.lerp(partialTicks, this.zoomOutOldAmount, this.zoomOutAmount) * 5;
+    }
+    tick() {
+        super.tick();
+        this.zoomOutOldAmount = this.zoomOutAmount;
+        if (this.clientIn.keyHandler.keyZoomout.isDown) {
+            if (this.zoomOutAmount < this.zoomoutMax) {
+                this.zoomOutAmount++;
+            }
+        }
+        else {
+            if (this.zoomOutAmount > this.zoomoutMin) {
+                this.zoomOutAmount--;
+            }
+        }
+    }
+    update(partialTicks) {
+        const pos = this.clientIn.entityPlayer.getRenderPos(partialTicks);
+        this.pos[0] = pos[0];
+        this.pos[1] = pos[1] + this.getYOffset(partialTicks);
+        this.pos[2] = pos[2];
+        this.dir[0] = -89.9;
+        this.dir[1] = this.getRenderYaw(partialTicks);
+    }
+    moveYawByPlayerVel(x, y, z, offset = 0) {
+        const degree = MathUtil.calcAngleDegrees(z, x) + offset;
+        if (degree < 0 && this.playerYaw > 90)
+            this.playerYaw -= 360;
+        if (degree > 90 && this.playerYaw < 0)
+            this.playerYaw += 360;
+        this.playerYaw += (degree - this.playerYaw) * 0.025;
+    }
+    getRenderYaw(partialTicks) {
+        return MathUtil.rotLerp(partialTicks, this.playerOldYaw, this.playerYaw);
+    }
+}
+class CamTitle extends Cam {
+    update(partialTicks) {
+        this.pos[0] = 0.0;
+        this.pos[1] = 25.0;
+        this.pos[2] = 0.0;
+        this.dir[0] = -75.0;
+        this.dir[1] = (Date.now() / 100) % 360;
+        this.dir[2] = 0.0;
+    }
+}
 class PathfindNode {
     constructor(x, y) {
         this.x = x; // ノードの x 座標
@@ -2818,10 +3208,12 @@ function filterByEntityDistance(client, gameIn) {
     return dis < 25;
 }
 function filterByUuid(client, gameIn) {
-    return client.entityPlayer.uuid == this;
+    var _c;
+    return ((_c = client === null || client === void 0 ? void 0 : client.entityPlayer) === null || _c === void 0 ? void 0 : _c.uuid) == this;
 }
 function filterByUuids(client, gameIn) {
-    return this.includes(client.entityPlayer.uuid);
+    var _c;
+    return this.includes((_c = client === null || client === void 0 ? void 0 : client.entityPlayer) === null || _c === void 0 ? void 0 : _c.uuid);
 }
 function isin(player, entity) {
     const dis = MathUtil.getDistance3(player.pos[0], player.pos[1], player.pos[2], entity.pos[0], entity.pos[1], entity.pos[2]);
@@ -3068,7 +3460,8 @@ class DataEventSyncManager {
 //#region Entity
 class Entity {
     constructor(gameIn) {
-        var _d;
+        var _c;
+        this.gameIn = gameIn;
         this.size = vec2.fromValues(1, 2);
         this.speed = 0.1;
         this.bb = new AABB(0, 0, 0, 0, 0, 0).initBySize(this.size);
@@ -3084,8 +3477,9 @@ class Entity {
         this.wasSpawned = false;
         this.wasCollision = new wasCollisionContext(false, false, false);
         this.sended = new Set;
+        this.isDiscarded = false;
         this.screenPos = vec2.fromValues(NaN, NaN);
-        (_d = this.uuid) !== null && _d !== void 0 ? _d : (this.uuid = crypto.randomUUID());
+        (_c = this.uuid) !== null && _c !== void 0 ? _c : (this.uuid = crypto.randomUUID());
         if (gameIn instanceof Server) {
             this.serverIn = gameIn;
         }
@@ -3096,7 +3490,7 @@ class Entity {
         this.rotation = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, Entity.ROTATION_ID, 0, this));
         // debugRegisterFinalization(this, this.constructor.name);
     }
-    tick(gameIn) {
+    tick() {
         this.oldMovedDis = this.movedDis;
         this.movedDis = MathUtil.getLength3(this.oldPos[0] - this.pos[0], this.oldPos[1] - this.pos[1], this.oldPos[2] - this.pos[2]);
         if (!isFinite(this.movedDis))
@@ -3106,32 +3500,32 @@ class Entity {
         this.oldPos[1] = this.pos[1];
         this.oldPos[2] = this.pos[2];
         this.oldRotation = this.rotation.get();
-        this.syncManager.checkSendMain(gameIn, this);
+        this.syncManager.checkSendMain(this.gameIn, this);
         if (this.canMove() && this.isAlive())
-            this.travel(gameIn);
+            this.travel();
         this.gravityTick();
         this.frictionTick();
         if (this.canMove())
             this.move(this.velocity);
-        if (gameIn instanceof Server)
-            this.checkDespawn(gameIn);
+        if (this.gameIn instanceof Server)
+            this.checkDespawn();
         // console.log(this.constructor.name, Math.abs(this.rotation - this.oldRotation), this.rotation, this.oldRotation)
         this.ticksAlived++;
     }
-    canHurt() {
+    canHurt(attacker) {
         return false;
     }
     isAlive() {
-        return true;
+        return !this.isDiscarded;
     }
     canMove() {
         return true;
     }
-    travel(gameIn) {
+    travel() {
     }
-    checkMovePacket(gameIn) {
+    checkMovePacket() {
         if (vec3.dist(this.pos, this.oldPos) > 0.1)
-            this.sendMovePacket(gameIn);
+            this.sendMovePacket();
         // if (Math.abs(this.rotation.get() - this.oldRotation) > 1)
         // this.sendRotatePacket(gameIn);
     }
@@ -3156,6 +3550,20 @@ class Entity {
         data.velZ = this.velocity[2];
         data.rotation = this.rotation.get();
     }
+    load(data) {
+        if (TypeUtil.isUUID(data.uuid)) {
+            this.uuid = data.uuid;
+        }
+        if (TypeUtil.isFiniteNumber(data.posX) && TypeUtil.isFiniteNumber(data.posY) && TypeUtil.isFiniteNumber(data.posZ)) {
+            this.setPos(data.posX, data.posY, data.posZ);
+        }
+        if (TypeUtil.isFiniteNumber(data.velX) && TypeUtil.isFiniteNumber(data.velY) && TypeUtil.isFiniteNumber(data.velZ)) {
+            this.setVelocity(data.velX, data.velY, data.velZ);
+        }
+        if (TypeUtil.isFiniteNumber(data.rotation)) {
+            this.rotation.set(data.rotation);
+        }
+    }
     static getEntityByData(data) {
         if (TypeUtil.isNumber(data.registryName)) {
             const entity = EntityType.getById(data.registryName);
@@ -3165,14 +3573,13 @@ class Entity {
         }
         return null;
     }
-    load(data, version) {
-    }
-    spawn(gameIn) {
-        if (gameIn.entities.includes(this))
+    spawn() {
+        if (this.gameIn.entities.includes(this))
             console.warn("entity ", this, " was double spawned");
-        gameIn.entities.push(this);
-        if (gameIn instanceof Server) {
-            this.syncManager.checkSendMain(gameIn, this);
+        this.gameIn.entities.push(this);
+        if (this.gameIn instanceof Server) {
+            this.sended.clear(); // desync bug fix
+            this.syncManager.checkSendMain(this.gameIn, this);
         }
         this.wasSpawned = true;
         return this;
@@ -3192,48 +3599,37 @@ class Entity {
         this.uuid = entityUUID; //?? crypto.randomUUID();
         return this;
     }
-    discard(gameIn) {
+    discard() {
         // console.trace(this)
-        gameIn.entities.removeByInstance(this);
+        this.isDiscarded = true;
+        this.gameIn.entities.removeByInstance(this);
         if (this.uuid == null)
             throw Error("Bug detected! " + "uuid is null");
-        if (gameIn instanceof Server)
-            gameIn.sendAll(new PacketToClientEntityDiscard(this.uuid));
+        if (this.gameIn instanceof Server)
+            this.gameIn.sendAll(new PacketToClientEntityDiscard(this.uuid));
         return true;
     }
-    checkSend(gameIn) {
-        if (gameIn instanceof Server) {
-            for (const player of gameIn.entities.getPlayers()) {
+    checkSend() {
+        if (this.gameIn instanceof Server) {
+            for (const player of this.gameIn.entities.getPlayers()) {
                 if (player.serverClient == null)
                     throw Error("bug detected serverClient is null");
                 if (!this.sended.has(player.uuid)) {
-                    this.sendCreatePacket(gameIn, player.serverClient);
-                    this.syncManager.trySendAllToClient(gameIn, true, player.serverClient);
+                    this.sendCreatePacket(this.gameIn, player.serverClient);
+                    this.syncManager.trySendAllToClient(this.gameIn, true, player.serverClient);
                     this.sended.add(player.uuid);
                 }
-                this.syncManager.trySendAllToClient(gameIn, false, player.serverClient);
+                this.syncManager.trySendAllToClient(this.gameIn, false, player.serverClient);
             }
         }
-        else if (gameIn instanceof Client) {
-            this.syncManager.trySendAllToServer(gameIn, false);
+        else if (this.gameIn instanceof Client) {
+            this.syncManager.trySendAllToServer(this.gameIn, false);
         }
     }
-    sendMovePacket(gameIn) {
-        if (gameIn instanceof Server) {
-            gameIn.sendAllWithFilter(new PacketToClientEntityMove(this.uuid, this.pos[0], this.pos[1], this.pos[2]), filterByUuids.bind(Array.from(this.sended.values())));
+    sendMovePacket() {
+        if (this.gameIn instanceof Server) {
+            this.gameIn.sendAllWithFilter(new PacketToClientEntityMove(this.uuid, this.pos[0], this.pos[1], this.pos[2]), filterByUuids.bind(Array.from(this.sended.values())));
         }
-    }
-    sendRotatePacket(gameIn) {
-        if (gameIn instanceof Server) {
-            // gameIn.sendAllWithFilter({ msgType: "entityRotate", rotation: this.rotation.get(), entityUUID: this.uuid }, filterByUuids.bind(Array.from(this.sended.values())));
-        }
-    }
-    sendEventPacket(gameIn, id, data) {
-        if (gameIn instanceof Server) {
-            // gameIn.sendAllWithFilter({ msgType: "entityEvent", entityUUID: this.uuid, id: id, data: data }, filterByUuids.bind(Array.from(this.sended.values())));
-        }
-    }
-    recieveEventPacket(gameIn, id, data) {
     }
     addVelocity(x, y, z) {
         this.velocity[0] += x;
@@ -3272,7 +3668,7 @@ class Entity {
     getHorizontalDistanceByEntity(other) {
         return MathUtil.getDistance2(this.pos[0], this.pos[2], other.pos[0], other.pos[2]);
     }
-    onPlayerMove(player, gameIn) {
+    onPlayerMove(player) {
     }
     move(dis) {
         let [xa, ya, za] = dis;
@@ -3336,6 +3732,9 @@ class Entity {
         this.bb = new AABB(x - this.size[0] / 2, y, z - this.size[0] / 2, x + this.size[0] / 2, y + this.size[1], z + this.size[0] / 2);
         this.pos = vec3.fromValues(x, y, z);
     }
+    setPos3(pos) {
+        this.setPos(pos[0], pos[1], pos[2]);
+    }
     getRenderPos(partialTicks) {
         // if (this.ticksAlived <= 1) return this.pos;
         const x = MathUtil.lerp(partialTicks, this.oldPos[0], this.pos[0]);
@@ -3349,13 +3748,12 @@ class Entity {
                 return true;
         return false;
     }
-    trace(start, normal) {
-        const cubes = this.getCollides();
+    trace(start, normalAndDist, sropPredecate) {
         let lastPos = start;
-        for (let i = 0; i <= 1; i += 1 / vec3.len(normal)) {
-            const dis = vec3Util.tomul(normal, i);
+        for (let i = 0; i <= 1; i += 1 / vec3.len(normalAndDist)) {
+            const dis = vec3Util.tomul(normalAndDist, i);
             const moved = vec3.add(vec3.create(), start, dis);
-            if (this.isOnWall(moved[0], moved[1], moved[2], cubes)) {
+            if (sropPredecate(moved)) {
                 return lastPos;
             }
             lastPos = moved;
@@ -3410,17 +3808,19 @@ class Entity {
         return vec4.fromValues(0, 0, 0, 0);
     }
     setupVertices(verticesData, partialTicks, cam) {
-        for (let cube of this.getRenderCubes(partialTicks)) {
+        const renderCube = new EntityCubeRoot();
+        this.getRenderCubes(renderCube, partialTicks);
+        for (let cube of renderCube.getDescendants()) {
             const leftIndex = verticesData.indices[verticesData.indices.length - 1];
             const offset = leftIndex == null ? 0 : leftIndex + 1;
-            verticesData.position.push(...cube.getRotatedVertcies());
+            verticesData.position.push(...cube.getVertices());
             verticesData.textureCoord.push(...cube.getTextureUVs());
             verticesData.textureVarious.push(...cube.getTextureVarious());
             verticesData.indices.push(...cube.getTextureIndices(offset));
         }
     }
     setupDebugLineVertices(verticesData, partialTicks, clientIn, serverIn) {
-        if (Core.debugBBRender && this.bb) {
+        if (DebugUtil.debugBBRender && this.bb) {
             const { x0, y0, z0, x1, y1, z1 } = this.bb;
             const vertices = [
                 // Bottom face
@@ -3448,11 +3848,8 @@ class Entity {
         }
         // console.log(verticesData)
     }
-    getRenderCubes(partialTicks) {
-        return [
-            Entity.cubeHead,
-            Entity.cubeNose
-        ];
+    getRenderCubes(root, partialTicks) {
+        root.add(new EntityCube(-this.size[0] / 2, 0, -this.size[0] / 2, this.size[0] / 2, this.size[1], this.size[0] / 2));
     }
     getRenderTexture(partialTicks) {
         return [textures.get("stone")];
@@ -3478,15 +3875,15 @@ class Entity {
     isDespawnProtection() {
         return false;
     }
-    checkDespawn(gameIn) {
+    checkDespawn() {
         if (!this.canDespawn())
             return;
-        const isInRange = gameIn.entities.filter(e => e.isDespawnProtection()).some(e => vec3.dist(this.pos, e.pos) < Entity.DESPAWN_RANGE);
+        const isInRange = this.gameIn.entities.filter(e => e.isDespawnProtection()).some(e => vec3.dist(this.pos, e.pos) < Entity.DESPAWN_RANGE);
         if (isInRange)
             return;
         // console.log(this, "was despawned")
         if (MathUtil.randomInt(0, 100) == 0)
-            this.discard(gameIn);
+            this.discard();
     }
 }
 Entity.ROTATION_ID = 0x00;
@@ -3496,8 +3893,9 @@ Entity.ATTACK_ID = 0x20;
 Entity.SPRINT_ID = 0x21;
 Entity.IS_SPRINTING_ID = 0x22;
 Entity.IS_SPRINTING_OR_COOLDOWN_ID = 0x23;
-Entity.IS_XP_POINT_ID = 0x24;
-Entity.IS_XP_LEVEL_ID = 0x25;
+Entity.XP_POINT_ID = 0x24;
+Entity.XP_LEVEL_ID = 0x25;
+Entity.XP_SIZE_ID = 0x20;
 Entity.POWER_LEVEL_ID = 0x20;
 Entity.SHOOT_EVENT_ID = 0x21;
 Entity.BASE_SCALE = 1 / 16;
@@ -3505,7 +3903,9 @@ Entity.cubeHead = new CubePlayerHead(-0.5, -0.5, -0.5, 0.5, 0.5, 0.5);
 Entity.cubeNose = new CubePlayerHead(-0.1, 0.4, 0.0, 0.1, 0.6, 0.5);
 Entity.DESPAWN_RANGE = 20;
 const HURT_COOLDOWN = 10;
-class EntityLiving extends Entity {
+class EntityHurtable extends Entity {
+}
+class EntityLiving extends EntityHurtable {
     constructor(gameIn) {
         super(gameIn);
         // maxHealth: number = 100;
@@ -3517,16 +3917,16 @@ class EntityLiving extends Entity {
     getMaxHealth() {
         return 100;
     }
-    tick(gameIn) {
-        super.tick(gameIn);
+    tick() {
+        super.tick();
         this.damageCooldown--;
         this.clientHurtTime--;
         if (!this.isAlive()) {
             this.deathTime++;
-            if (this.deathTime >= EntityLiving.deathDisapperTime && Core.debugDoDiscardOnDeath) {
-                gameIn.spawnKillEffectEvent.trigger(this.pos, this.size[0]);
-                this.dropLoots(gameIn);
-                this.discard(gameIn);
+            if (this.deathTime >= EntityLiving.deathDisapperTime && DebugUtil.debugDoDiscardOnDeath) {
+                this.gameIn.spawnKillEffectEvent.trigger(this.pos, this.size[0]);
+                this.dropLoots();
+                this.discard();
             }
         }
     }
@@ -3536,18 +3936,15 @@ class EntityLiving extends Entity {
     isInDamageCooldown() {
         return this.damageCooldown > 0;
     }
-    canHurt() {
+    canHurt(attacker) {
         return this.isAlive();
     }
-    heal(amount, gameIn) {
+    heal(amount) {
         const healedHealth = Math.min(this.health.get() + amount, this.getMaxHealth());
         this.health.set(healedHealth);
-        if (gameIn instanceof Server) {
-            this.updateHealth(gameIn);
-        }
     }
-    hurt(damage, attacker, gameIn) {
-        if (this.isInDamageCooldown() || !this.canHurt())
+    hurt(damage, attacker) {
+        if (this.isInDamageCooldown() || !this.canHurt(attacker))
             return false;
         this.damageCooldown = 10;
         const damagedHealth = this.health.get() - damage;
@@ -3562,17 +3959,11 @@ class EntityLiving extends Entity {
         }
         if (this.uuid == null)
             throw Error("Bug detected! " + "uuid is null");
-        if (gameIn instanceof Server) {
-            gameIn.sendAll(new PacketToClientHurtAnimation(this.uuid));
-            this.updateHealth(gameIn);
+        if (this.gameIn instanceof Server) {
+            this.gameIn.sendAll(new PacketToClientHurtAnimation(this.uuid));
         }
         // console.log(value, attacker);
         return true;
-    }
-    updateHealth(serverIn) {
-        if (this.uuid == null)
-            throw Error("Bug detected! " + "uuid is null");
-        // serverIn.sendAll({ msgType: "updateEntityHealth", health: this.health.get(), maxHealth: this.maxHealth, entityUUID: this.uuid });
     }
     HurtAnimationStart() {
         this.clientHurtTime = 10;
@@ -3583,12 +3974,20 @@ class EntityLiving extends Entity {
     getHurtColor(partialTicks) {
         return vec4.fromValues(1, 0, 0, 0.5);
     }
-    dropLoots(gameIn) { }
-    travel(gameIn) {
-        // this.addVelocity(0, -this.getGravity(), 0);
-        super.travel(gameIn);
+    dropLoots() { }
+    save(data) {
+        super.save(data);
+        data.health = this.health.get();
+    }
+    load(data) {
+        super.load(data);
+        if (TypeUtil.isFiniteNumber(data.health)) {
+            this.health.set(data.health);
+        }
     }
     getGravity() {
+        if (!this.isAlive())
+            return 0.0;
         return 0.5;
     }
     getFriction() {
@@ -3604,30 +4003,22 @@ class EntityPlayer extends EntityLiving {
         super(gameIn);
         this.size = vec2.fromValues(1, 2);
         this.speed = 0.3;
-        // sendCreatePacket(serverIn: Server, client: undefined, msgObj = {}) {
-        // super.sendCreatePacket(serverIn, client, Object.assign(msgObj, { userName: this.userName }))
-        // }
-        // recreateByPacket({ posX, posY, posZ, entityUUID, rotation, userName }: { posX: number, posY: number, posZ: number, entityUUID: UUID, rotation: number, userName: string }) {
-        // super.recreateByPacket({ posX, posY, posZ, entityUUID, rotation });
-        // this.userName = userName;
-        // return this;
-        // }
         this.attackTime = 0;
         this.isAttacking = false;
         this.sprintTick = 0;
         this.sprintCooldown = 0;
         this.sprintingOrInCooldownTick = 0;
         this.rotation = this.syncManager.register(new EntityDataSyncProperty(Side.CLIENT, Entity.ROTATION_ID, 0, this));
-        this.attackEvent = this.syncManager.register(new EntityEventSyncProperty(Side.CLIENT, EntityPlayer.ATTACK_ID, data => this.tryAttack(gameIn), this));
-        this.sprintEvent = this.syncManager.register(new EntityEventSyncProperty(Side.CLIENT, EntityPlayer.SPRINT_ID, data => this.trySprint(gameIn), this));
+        this.attackEvent = this.syncManager.register(new EntityEventSyncProperty(Side.CLIENT, EntityPlayer.ATTACK_ID, data => this.tryAttack(), this));
+        this.sprintEvent = this.syncManager.register(new EntityEventSyncProperty(Side.CLIENT, EntityPlayer.SPRINT_ID, data => this.trySprint(), this));
         this.isSprinting = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.IS_SPRINTING_ID, 0, this, entity => entity != this));
         this.isSprintingOrInCooldown = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.IS_SPRINTING_OR_COOLDOWN_ID, 0, this, entity => entity != this));
-        this.xpPoint = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.IS_XP_POINT_ID, 0, this));
-        this.xpLevel = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.IS_XP_LEVEL_ID, 1, this));
+        this.xpPoint = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.XP_POINT_ID, 0, this));
+        this.xpLevel = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityPlayer.XP_LEVEL_ID, 1, this));
         this.health.set(this.getMaxHealth());
     }
-    tick(gameIn) {
-        super.tick(gameIn);
+    tick() {
+        super.tick();
         if (this.isAttacking) {
             this.attackTime++;
             if (this.attackTime >= 10) {
@@ -3635,24 +4026,41 @@ class EntityPlayer extends EntityLiving {
                 this.isAttacking = false;
             }
         }
-        this.checkSprint(gameIn);
+        this.checkSprint();
     }
-    triggerOnPlayerMove(gameIn) {
-        for (const entity of gameIn.entities) {
-            entity.onPlayerMove(this, gameIn);
+    triggerOnPlayerMove() {
+        for (const entity of this.gameIn.entities) {
+            entity.onPlayerMove(this);
         }
     }
-    sendMovePacket(gameIn) {
+    sendMovePacket() {
     }
-    getAttackEntities(gameIn) {
+    save(data) {
+        super.save(data);
+        data.xpPoint = this.xpPoint.get();
+        data.xpLevel = this.xpLevel.get();
+    }
+    load(data) {
+        super.load(data);
+        if (TypeUtil.isFiniteNumber(data.xpPoint)) {
+            this.xpPoint.set(data.xpPoint);
+        }
+        if (TypeUtil.isFiniteNumber(data.xpLevel)) {
+            this.xpLevel.set(data.xpLevel);
+        }
+    }
+    getAttackEntities() {
         const offset = 1;
         const radian = MathUtil.toRadian(this.rotation.get());
         const offsetX = Math.sin(radian) * offset + this.pos[0];
         const offsetY = this.pos[1];
         const offsetZ = Math.cos(radian) * offset + this.pos[2];
         const checkbb = new AABB(0, 0, 0, 0, 0, 0).initBySize(vec2.fromValues(3, 1)).toMoved(offsetX, offsetY, offsetZ);
-        const entities = gameIn.entities.getCollideWith(checkbb).getOnlyClass(EntityEnemy).filter(e => e.canHurt());
+        const entities = this.gameIn.entities.getCollideWith(checkbb).getOnlyClass(EntityHurtable).filter(e => e.canHurt(this));
         return entities;
+    }
+    canHurt(attacker) {
+        return super.canHurt(attacker) && Core.canPvp ? true : attacker instanceof EntityPlayer === false;
     }
     isDespawnProtection() {
         return true;
@@ -3663,9 +4071,9 @@ class EntityPlayer extends EntityLiving {
     getMaxHealth() {
         return this.xpLevel.get() * 10 + 100;
     }
-    respawn(gameIn) {
+    respawn() {
     }
-    tryAttack(gameIn) {
+    tryAttack() {
     }
     updateXpLevel(newLevel) {
         if (this.xpLevel.get() == newLevel)
@@ -3692,16 +4100,16 @@ class EntityPlayer extends EntityLiving {
     canSprint() {
         return this.sprintCooldown <= 0 && !this.isSprinting.get();
     }
-    trySprint(gameIn) {
+    trySprint() {
         if (!this.canSprint())
             return false;
         this.isSprinting.set(1);
         this.isSprintingOrInCooldown.set(1);
         return true;
     }
-    checkSprint(gameIn) {
-        if (gameIn instanceof Client)
-            this.checkSpawnSprintParticle(gameIn);
+    checkSprint() {
+        if (this.gameIn instanceof Client)
+            this.checkSpawnSprintParticle();
         if (this.sprintCooldown > 0) {
             this.sprintCooldown--;
         }
@@ -3723,13 +4131,15 @@ class EntityPlayer extends EntityLiving {
             }
         }
     }
-    checkSpawnSprintParticle(clientIn) {
+    checkSpawnSprintParticle() {
+        if (this.gameIn instanceof Client === false)
+            throw Error("Bug detected! " + "game is not client");
         if (this.isSprinting.get() || this.isSprintingOrInCooldown.get() && this.movedDis > 1) {
-            const particleF = new ParticleSprintFire(vec3Util.add(vec3.create(), this.pos, 0, 0.1, 0), vec3Util.tomul(this.velocity, -1));
-            particleF.spawn(clientIn);
+            const particleF = new ParticleSprintFire(this.gameIn, vec3Util.add(vec3.create(), this.pos, 0, 0.1, 0), vec3Util.tomul(this.velocity, -1));
+            particleF.spawn();
             for (let index = 0; index < 3; index++) {
-                const particleS = new ParticleSprintSmoke(vec3Util.add(vec3.create(), this.pos, 0, 0.1, 0));
-                particleS.spawn(clientIn);
+                const particleS = new ParticleSprintSmoke(this.gameIn, vec3Util.add(vec3.create(), this.pos, 0, 0.1, 0));
+                particleS.spawn();
             }
         }
     }
@@ -3744,7 +4154,7 @@ class EntityPlayer extends EntityLiving {
         const movedDis = this.getFixedMovedDisForAnim(partialTicks);
         return Math.sin((totalMovedDis % (Math.PI * 2)) * speed) * scale * movedDis;
     }
-    getRenderCubes(partialTicks) {
+    getRenderCubes(root, partialTicks) {
         let fixedMovedDis = this.getFixedMovedDisForAnim(partialTicks) * 50;
         let deltaSprintTick = this.isSprintingOrInCooldown.get() ? this.sprintingOrInCooldownTick + partialTicks : 0;
         const sprintArmRot = Math.abs(Math.cos(deltaSprintTick / (EntityPlayer.SPRINT_BOOST_TIME + EntityPlayer.SPRINT_COOLDOWN) * Math.PI)) * 80;
@@ -3771,25 +4181,16 @@ class EntityPlayer extends EntityLiving {
         const weaponOffset = 1;
         const weaponRotationMat = Renderer.rotationMatrix(rightArmPitch, rightArmYaw, rightArmRoll);
         const weaponRotatedPoint = Renderer.rotatePointAroundCenter(vec3.fromValues(-(4 + armSize - weaponOffset), 11, 0), weaponRotationMat, vec3.fromValues(-4, 10.5, 0));
-        return [
-            new Cube(-4, 12, -4, 4, 20, 4).setTexture(64, 64, 0, 0).toScaledWithCenter(1.5, 1.5, 1.5, 0, 12, 0),
-            new Cube(-4, 12, -4, 4, 20, 4).setTexture(64, 64, 32, 0).toScaledWithCenter(1.5, 1.5, 1.5, 0, 12, 0).toScaledWithCenter(1.1, 1.1, 1.1, 0, 16, 0),
-            new Cube(-4, 0, -2, 0, 6, 2).setTexture(64, 64, 24, 16).addThisRotate(rightLegPitch, 0, 0, 0, 4, 0),
-            new Cube(0, 0, -2, 4, 6, 2).setTexture(64, 64, 24, 16).addThisRotate(leftLegPitch, 0, 0, 0, 4, 0),
-            new Cube(-4, 6, -2, 4, 12, 2).setTexture(64, 64, 0, 16),
-            new Cube(-4 - armSize, 9, -1.5, -4, 12, 1.5).setTexture(64, 64, 40, 16).addThisRotate(rightArmPitch, rightArmYaw, rightArmRoll, -4, 12, 0),
-            new Cube(4, 9, -1.5, 4 + armSize, 12, 1.5).setTexture(64, 64, 40, 16, true).addThisRotate(leftArmPitch, leftArmYaw, leftArmRoll, 4, 12, 0),
-            // new Cube(-(4 + armSize - weaponOffset + weaponSize), 10.5, -0.5, -(4 + armSize - weaponOffset), 11.5, 0.5).setTexture(64, 64, 0, 30).addThisRotate(rightArmPitch, rightArmYaw, rightArmRoll, -4, 12, 0).addThisRotate(0, -90, 0, weaponRotatedPoint[0], weaponRotatedPoint[1], weaponRotatedPoint[2])
-        ];
+        const body = root.add(new EntityCube(-4, 6, -2, 4, 12, 2).setTexture(64, 64, 0, 16));
+        const head = body.add(new EntityCube(-4, 12, -4, 4, 20, 4).setTexture(64, 64, 0, 0).scale(1.5, 1.5, 1.5, 0, 12, 0));
+        const hair = head.add(new EntityCube(-4, 12, -4, 4, 20, 4).setTexture(64, 64, 32, 0).scale(1.1, 1.1, 1.1, 0, 16, 0));
+        const rLeg = body.add(new EntityCube(-4, 0, -2, 0, 6, 2).setTexture(64, 64, 24, 16).rotate(rightLegPitch, 0, 0, 0, 4, 0));
+        const lLeg = body.add(new EntityCube(0, 0, -2, 4, 6, 2).setTexture(64, 64, 24, 16).rotate(leftLegPitch, 0, 0, 0, 4, 0));
+        const rArm = body.add(new EntityCube(-4 - armSize, 9, -1.5, -4, 12, 1.5).setTexture(64, 64, 40, 16).rotate(rightArmPitch, rightArmYaw, rightArmRoll, -4, 12, 0));
+        const lArm = body.add(new EntityCube(4, 9, -1.5, 4 + armSize, 12, 1.5).setTexture(64, 64, 40, 16, true).rotate(leftArmPitch, leftArmYaw, leftArmRoll, 4, 12, 0));
     }
     getRenderTexture(partialTicks) {
-        return [textures.get("player")];
-    }
-    getSecondRenderCubes(partialTicks) {
-        return [];
-    }
-    getSecondRenderTexture(partialTicks) {
-        return [textures.get("playerWeapon")];
+        return [Renderer.texturePlayer];
     }
 }
 EntityPlayer.SPRINT_KEY_INTERVAL = 5;
@@ -3800,68 +4201,61 @@ class EntityPlayerServer extends EntityPlayer {
     constructor(serverIn, serverClient) {
         super(serverIn);
         this.shouldUpdateHealth = false;
-        this.serverIn = serverIn;
         this.serverClient = serverClient;
     }
-    tick(serverIn) {
-        super.tick(serverIn);
+    tick() {
+        super.tick();
     }
     canMove() {
         return false;
     }
     addVelocity(x, y, z) {
         super.addVelocity(x, y, z);
-        if (this.uuid == null)
-            throw Error("Bug detected! " + "uuid is null");
-        this.serverIn.sendAll(new PacketToClientEntityVelocity(this.uuid, this.velocity[0], this.velocity[1], this.velocity[2]));
+        if (this.gameIn instanceof Server === false)
+            throw Error("Bug detected! " + "game is not server");
+        this.gameIn.sendAll(new PacketToClientEntityVelocity(this.uuid, this.velocity[0], this.velocity[1], this.velocity[2]));
     }
     setVelocity(x, y, z) {
         super.setVelocity(x, y, z);
-        if (this.uuid == null)
-            throw Error("Bug detected! " + "uuid is null");
-        this.serverIn.sendAll(new PacketToClientEntityVelocity(this.uuid, this.velocity[0], this.velocity[1], this.velocity[2]));
+        if (this.gameIn instanceof Server === false)
+            throw Error("Bug detected! " + "game is not server");
+        this.gameIn.sendAll(new PacketToClientEntityVelocity(this.uuid, this.velocity[0], this.velocity[1], this.velocity[2]));
     }
     setPos(x, y, z) {
         super.setPos(x, y, z);
-        if (this.uuid == null)
-            throw Error("Bug detected! " + "uuid is null");
-        this.serverIn.sendAll(new PacketToClientEntityMove(this.uuid, this.pos[0], this.pos[1], this.pos[2]));
+        if (this.gameIn instanceof Server === false)
+            throw Error("Bug detected! " + "game is not server");
+        this.gameIn.sendAll(new PacketToClientEntityMove(this.uuid, this.pos[0], this.pos[1], this.pos[2]));
     }
-    tryAttack(serverIn) {
+    tryAttack() {
         const damage = this.getAttackDamage();
-        const entities = this.getAttackEntities(serverIn);
+        const entities = this.getAttackEntities();
         // console.log(checkbb)
         // console.log(entities)
-        entities.hurtAll(damage, this, serverIn);
+        entities.hurtAll(damage, this);
     }
-    hurt(value, attacker, gameIn) {
+    hurt(value, attacker) {
         this.shouldUpdateHealth = true;
-        return super.hurt(value, attacker, gameIn);
+        return super.hurt(value, attacker);
     }
-    heal(amount, gameIn) {
+    heal(amount) {
         this.shouldUpdateHealth = true;
-        return super.heal(amount, gameIn);
+        return super.heal(amount);
     }
-    discard(serverIn) {
-        if (this.uuid == null)
-            throw Error("Bug detected! " + "uuid is null");
-        serverIn.sendAll(new PacketToClientDeletePlayerData(this.uuid));
-        return super.discard(serverIn);
-    }
-    playerServerEvent(serverIn, msg) {
-        if (msg.event == "sprint") {
-            const result = this.trySprint(serverIn);
-            // console.log("sprint", result)
-        }
+    discard() {
+        if (this.gameIn instanceof Server === false)
+            throw Error("Bug detected! " + "game is not server");
+        this.gameIn.sendAll(new PacketToClientDeletePlayerData(this.uuid));
+        return super.discard();
     }
     getSpawnPoint(erverIn) {
         return vec3.fromValues(0, 0, 0);
     }
-    respawn(gameIn) {
+    respawn() {
         if (this.isAlive())
             return;
-        if (gameIn instanceof Server) {
-            gameIn.spawnPlayer(this.serverClient, this.userName);
+        if (this.gameIn instanceof Server) {
+            this.gameIn.spawnPlayer(this.serverClient, this);
         }
     }
 }
@@ -3873,77 +4267,77 @@ class EntityPlayerClient extends EntityPlayer {
         this.playersData = new PlayerData(0, 0, undefined);
         this.sprintVel = vec3.fromValues(0, 0, 0);
         this.elapsedLastKeysDownTime = [0, 0, 0, 0];
-        this.clientIn = clientIn;
     }
-    tick(clientIn) {
-        super.tick(clientIn);
-        if (this.isControlable(clientIn)) {
-            this.moveToControl(clientIn);
-            this.checkAttack(clientIn);
+    tick() {
+        super.tick();
+        if (this.isControlable()) {
+            this.moveToControl();
+            this.checkAttack();
         }
     }
-    sendMovePacket(gameIn) {
-        if (gameIn instanceof Client) {
-            gameIn.send(new PacketToServerPlayerMove(this.pos[0], this.pos[1], this.pos[2]));
+    sendMovePacket() {
+        if (this.gameIn instanceof Client) {
+            this.gameIn.send(new PacketToServerPlayerMove(this.pos[0], this.pos[1], this.pos[2]));
         }
     }
-    sendRotatePacket(gameIn) {
-        if (gameIn instanceof Client) {
-            // gameIn.send({ msgType: "entityRotate", rotation: this.rotation.get(), entityUUID: this.uuid });
-        }
-    }
-    isControlable(clientIn) {
-        if (Core.debugFreeCam)
+    isControlable() {
+        if (this.gameIn instanceof Client === false)
+            throw Error("Bug detected! " + "game is not client");
+        if (DebugUtil.debugFreeCam)
             return false;
-        if (this != clientIn.entityPlayer)
+        if (this != this.gameIn.entityPlayer)
             return false;
-        if (clientIn.currentGui != null && !clientIn.currentGui.isControlable())
+        if (this.gameIn.camInGame.zoomOutAmount > 0)
+            return false;
+        if (this.gameIn.currentGui != null && !this.gameIn.currentGui.isControlable())
             return false;
         if (!this.isAlive())
             return false;
         return true;
     }
-    moveToControl(clientIn) {
-        if (Core.debugFreeCam)
-            return;
+    moveToControl() {
+        if (this.gameIn instanceof Client === false)
+            throw Error("Bug detected! " + "game is not client");
         const speed = this.speed;
         const moveVel = vec3.fromValues(0, 0, 0);
-        if (clientIn.keyHandler.keyLeft.isDown)
+        if (this.gameIn.keyHandler.keyLeft.isDown)
             moveVel[0]++;
-        if (clientIn.keyHandler.keyRight.isDown)
+        if (this.gameIn.keyHandler.keyRight.isDown)
             moveVel[0]--;
-        if (clientIn.keyHandler.keyUp.isDown)
+        if (this.gameIn.keyHandler.keyUp.isDown)
             moveVel[2]++;
-        if (clientIn.keyHandler.keyDown.isDown)
+        if (this.gameIn.keyHandler.keyDown.isDown)
             moveVel[2]--;
-        const fixedVel = MathUtil.rotatedMove(moveVel, clientIn.cam.dir[1], speed);
+        const fixedVel = MathUtil.rotatedMove(moveVel, this.gameIn.camInGame.dir[1], speed);
         this.addVelocity(fixedVel[0], fixedVel[1], fixedVel[2]);
         const isMoved = vec3.len(moveVel) != 0;
         if (isMoved) {
             this.oldRotation = this.rotation.get();
-            this.moveRotateByVelocity(moveVel[0], moveVel[1], moveVel[2], clientIn.cam.dir[1]);
-            clientIn.cam.moveYawByPlayerVel(moveVel[0], moveVel[1], Math.abs(moveVel[2]), clientIn.cam.dir[1]);
-            this.triggerOnPlayerMove(clientIn);
+            this.moveRotateByVelocity(moveVel[0], moveVel[1], moveVel[2], this.gameIn.camInGame.dir[1]);
+            this.gameIn.camInGame.moveYawByPlayerVel(moveVel[0], moveVel[1], Math.abs(moveVel[2]), this.gameIn.camInGame.dir[1]);
+            this.triggerOnPlayerMove();
         }
     }
-    trySprint(gameIn, sprintVel) {
-        const result = super.trySprint(gameIn);
-        if (result && gameIn instanceof Client && sprintVel != null) {
+    trySprint(sprintVel) {
+        const result = super.trySprint();
+        if (result && this.gameIn instanceof Client && sprintVel != null) {
             this.sprintEvent.trigger(0);
             // this.sendEventPacket(gameIn, EntityEventTypes.PLAYER_SPRINT, 0)
             this.sprintVel = sprintVel;
         }
         return result;
     }
-    checkSprint(clientIn) {
-        if (!this.isControlable(clientIn))
+    checkSprint() {
+        if (this.gameIn instanceof Client === false)
+            throw Error("Bug detected! " + "game is not client");
+        if (!this.isControlable())
             return;
         const moveVel = vec3.fromValues(0, 0, 0);
         const keys = new Map;
-        keys.set(clientIn.keyHandler.keyLeft, vec3.fromValues(1, 0, 0));
-        keys.set(clientIn.keyHandler.keyRight, vec3.fromValues(-1, 0, 0));
-        keys.set(clientIn.keyHandler.keyUp, vec3.fromValues(0, 0, 1));
-        keys.set(clientIn.keyHandler.keyDown, vec3.fromValues(0, 0, -1));
+        keys.set(this.gameIn.keyHandler.keyLeft, vec3.fromValues(1, 0, 0));
+        keys.set(this.gameIn.keyHandler.keyRight, vec3.fromValues(-1, 0, 0));
+        keys.set(this.gameIn.keyHandler.keyUp, vec3.fromValues(0, 0, 1));
+        keys.set(this.gameIn.keyHandler.keyDown, vec3.fromValues(0, 0, -1));
         let i = 0;
         let sprinted = false;
         for (const [key, vel] of keys.entries()) {
@@ -3959,33 +4353,29 @@ class EntityPlayerClient extends EntityPlayer {
             }
             i++;
         }
-        const fixedVel = MathUtil.rotatedMove(moveVel, clientIn.cam.dir[1], EntityPlayer.SPRINT_SPEED);
+        const fixedVel = MathUtil.rotatedMove(moveVel, this.gameIn.camInGame.dir[1], EntityPlayer.SPRINT_SPEED);
         // fixedVel[1] = 3;
         if (sprinted) {
-            this.trySprint(clientIn, fixedVel);
+            this.trySprint(fixedVel);
         }
-        super.checkSprint(clientIn);
+        super.checkSprint();
         if (this.isSprinting.get()) {
             this.addVelocity(this.sprintVel[0], this.sprintVel[1], this.sprintVel[2]);
         }
     }
-    checkAttack(clientIn) {
-        while (clientIn.keyHandler.keyAttack.consumeClick())
+    checkAttack() {
+        if (this.gameIn instanceof Client === false)
+            throw Error("Bug detected! " + "game is not client");
+        while (this.gameIn.keyHandler.keyAttack.consumeClick())
             this.attackEvent.trigger(0);
     }
-    tryAttack(clientIn) {
-        const entities = this.getAttackEntities(clientIn);
+    tryAttack() {
+        const entities = this.getAttackEntities();
         if (entities.length > 0) {
             this.isAttacking = true;
         }
         this.attackEvent.trigger(0);
         // clientIn.send({ msgType: "playerAttack" });
-    }
-    sendEventPacket(gameIn, id, data) {
-        super.sendEventPacket(gameIn, id, data);
-        if (gameIn instanceof Client) {
-            // gameIn.send({ msgType: "playerEvent", id: id, data: data });
-        }
     }
 }
 class PlayerData {
@@ -4001,32 +4391,58 @@ class EntityXp extends Entity {
         this.amount = amount;
         this.size = vec2.fromValues(1, 1);
         this.olderPos = vec3.fromValues(NaN, NaN, NaN);
+        this.fusionTick = MathUtil.randomInt(0, 19);
         this.syncVelocity = true;
+        const defaultSize = MathUtil.random(2, 4);
+        this.visualSize = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityXp.XP_SIZE_ID, defaultSize, this));
     }
-    tick(gameIn) {
+    canDespawn() {
+        return true;
+    }
+    tick() {
         this.olderPos[0] = this.oldPos[0];
         this.olderPos[1] = this.oldPos[1];
         this.olderPos[2] = this.oldPos[2];
-        super.tick(gameIn);
-        trySpawnParticle: if (gameIn instanceof Client && !gameIn.options.reduceParticles) {
+        super.tick();
+        trySpawnParticle: if (this.gameIn instanceof Client && !this.gameIn.options.reduceParticles) {
             const distanceParParticle = 0.4 / this.movedDis;
             if (distanceParParticle > 1)
                 break trySpawnParticle;
             let count = 0;
             for (let i = 0; i <= 1; i += distanceParParticle) {
-                const particle = new ParticleXpShadow(vec3.lerp(vec3.create(), this.olderPos, this.oldPos, i));
-                particle.spawn(gameIn);
+                const particle = new ParticleXpShadow(this.gameIn, vec3.lerp(vec3.create(), this.olderPos, this.oldPos, i));
+                particle.spawn();
                 count++;
             }
             // console.log(count)
         }
+        if (this.ticksAlived > 20 && this.ticksAlived % 20 == this.fusionTick && this.gameIn instanceof Server) {
+            this.tryFusion();
+        }
     }
-    onPlayerMove(player, gameIn) {
-        super.onPlayerMove(player, gameIn);
-        const collectDIst = 1 + 1.217 * player.movedDis; // プレイヤーの速度が速いと回収範囲が大きくなる
-        if (vec3.dist(this.pos, player.pos) < collectDIst && gameIn instanceof Server) {
+    // server
+    tryFusion() {
+        for (const entityxp of this.gameIn.entities.getOnlyClass(EntityXp)) {
+            if (!this.equals(entityxp) && vec3.dist(this.pos, entityxp.pos) < EntityXp.fusionDist) {
+                this.fusion(entityxp);
+            }
+        }
+    }
+    // server
+    fusion(target) {
+        if (!target.isAlive)
+            return;
+        this.visualSize.set(this.visualSize.get() + target.visualSize.get() / 4);
+        this.amount += target.amount;
+        this.setPos3(target.pos); // client animation
+        target.discard();
+    }
+    onPlayerMove(player) {
+        super.onPlayerMove(player);
+        const collectDIst = 1 + 1.217 * (player.movedDis + this.movedDis); // プレイヤーの速度が速いと回収範囲が大きくなる
+        if (vec3.dist(this.pos, player.pos) < collectDIst && this.gameIn instanceof Server) {
             player.growXpPoint(this.amount);
-            this.discard(gameIn);
+            this.discard();
         }
     }
     gravityTick() {
@@ -4040,32 +4456,32 @@ class EntityXp extends Entity {
         if (cam == null)
             throw Error("bug detected!" + "cam is null");
         const centerPos = vec3.fromValues(0, 0.5, 0);
-        const sizeNum = Math.min(this.amount * 0.05 + 4, 8);
+        const sizeNum = Math.min(this.visualSize.get(), 8);
         const size = vec2.fromValues(sizeNum, sizeNum);
         const textureLeftTop = vec2.fromValues(0, 0);
         const textureSize = vec2.fromValues(1, 1);
         Renderer.addBillboardToVertices(centerPos, size, textureLeftTop, textureSize, partialTicks, [new RotationPointContext(-cam.dir[0], cam.dir[1], 0, centerPos)], verticesData);
     }
-    getRenderCubes(partialTicks) {
-        return [
-            new Cube(-0.5, 0, -0.5, 0.5, 1, 0.5).setTexture(64, 64, 16, 0)
-        ];
-    }
     getRenderTexture(partialTicks) {
-        return [textures.get("xp")];
+        return [Renderer.textureXp];
     }
     getFriction() {
         return this.wasCollision.y ? 0.7 : 0.9;
     }
-    // sendCreatePacket(serverIn: Server, client: undefined, msgObj = {}) {
-    // const msgBase = { amount: this.amount };
-    // super.sendCreatePacket(serverIn, client, msgBase);
-    // }
-    // recreateByPacket({ posX, posY, posZ, entityUUID, rotation, amount }: { posX: number, posY: number, posZ: number, entityUUID: UUID, rotation: number, amount: number }) {
-    // super.recreateByPacket({ posX, posY, posZ, entityUUID, rotation });
-    // this.amount = amount ?? 0;
-    // return this;
-    // }
+    save(data) {
+        super.save(data);
+        data.amount = this.amount;
+        data.visualSize = this.visualSize.get();
+    }
+    load(data) {
+        super.load(data);
+        if (TypeUtil.isFiniteNumber(data.amount)) {
+            this.amount = data.amount;
+        }
+        if (TypeUtil.isFiniteNumber(data.visualSize)) {
+            this.visualSize.set(data.visualSize);
+        }
+    }
     static getOneSplittedXp(xp) {
         return xp / MathUtil.random(4, 8);
     }
@@ -4078,6 +4494,7 @@ class EntityXp extends Entity {
         return result;
     }
 }
+EntityXp.fusionDist = 1;
 class EntityEnemy extends EntityLiving {
     constructor(gameIn) {
         super(gameIn);
@@ -4092,22 +4509,25 @@ class EntityEnemy extends EntityLiving {
         this.pathfindResult = [];
         this.powerLevel = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityEnemy.POWER_LEVEL_ID, 1, this));
     }
-    dropLoots(gameIn) {
-        if (gameIn instanceof Server) {
-            for (const xpAmount of EntityXp.splittingXp(this.powerLevel.get() * 10)) {
-                const xp = new EntityType.XP(gameIn, xpAmount);
-                xp.setPos(this.pos[0], this.pos[1], this.pos[2]);
+    dropLoots() {
+        if (this.gameIn instanceof Server) {
+            for (const xpAmount of EntityXp.splittingXp(this.getDropXp())) {
+                const xp = new EntityXp(this.gameIn, xpAmount);
+                xp.setPos3(this.pos);
                 xp.addVelocity(MathUtil.random(-0.5, 0.5), 2.5, MathUtil.random(-0.5, 0.5));
-                xp.spawn(gameIn);
+                xp.spawn();
             }
         }
+    }
+    getDropXp() {
+        return this.powerLevel.get() * 10;
     }
     canDespawn() {
         return true;
     }
-    tick(gameIn) {
-        super.tick(gameIn);
-        if (gameIn instanceof Server) {
+    tick() {
+        super.tick();
+        if (this.gameIn instanceof Server) {
             // console.log(this.isPathfinding, this.pathfindResult, this.lastMovedCount)
             // console.log(this.pos)
             if (this.lastMovedCount <= 1) {
@@ -4119,13 +4539,13 @@ class EntityEnemy extends EntityLiving {
                 this.resetPathfind();
             if (this.noMovedTick > 25)
                 this.resetPathfind();
-            this.goToTargetCheck(gameIn);
-            this.targetFindAndForgetCheck(gameIn);
+            this.goToTargetCheck();
+            this.targetFindAndForgetCheck();
         }
-        this.rotateEntity(gameIn);
+        this.rotateEntity();
     }
-    travel(gameIn) {
-        super.travel(gameIn);
+    travel() {
+        super.travel();
         let count = 0;
         this.lastMovedIndexes.splice(0);
         let index = 0;
@@ -4161,7 +4581,8 @@ class EntityEnemy extends EntityLiving {
         this.lastMovedCount = count;
         // if (this.pathfindResult.length != 0) console.warn("pathfind: node was not found")
     }
-    goToTargetCheck(serverIn) {
+    // server
+    goToTargetCheck() {
         if (this.isPathfinding)
             return false;
         if (this.target != null) {
@@ -4172,7 +4593,8 @@ class EntityEnemy extends EntityLiving {
         }
         return false;
     }
-    targetFindAndForgetCheck(serverIn) {
+    // server
+    targetFindAndForgetCheck() {
         if (this.isPathfinding) {
             const target = this.target;
             if (this.target != null && this.getHorizontalDistanceByEntity(this.target) >= this.getForgetDistance())
@@ -4181,7 +4603,7 @@ class EntityEnemy extends EntityLiving {
                 return false;
         }
         ;
-        for (const target of serverIn.entities.copy().sort(Util.getSorterEntityDistanceBy(this))) {
+        for (const target of this.gameIn.entities.copy().sort(Util.getSorterEntityDistanceBy(this))) {
             if (MathUtil.getDistance2(this.pos[0], this.pos[2], target.pos[0], target.pos[2]) >= this.getFindableDistance())
                 continue;
             if (target instanceof EntityPlayer) {
@@ -4191,8 +4613,8 @@ class EntityEnemy extends EntityLiving {
         }
         return false;
     }
-    rotateEntity(gameIn) {
-        if (this.target != null) {
+    rotateEntity() {
+        if (this.isAlive() && this.target != null) {
             this.moveRotateToTarget(this.target.pos[0], this.target.pos[1], this.target.pos[2], 0);
         }
     }
@@ -4231,6 +4653,16 @@ class EntityEnemy extends EntityLiving {
     getForgetDistance() {
         return 40;
     }
+    save(data) {
+        super.save(data);
+        data.powerLevel = this.powerLevel.get();
+    }
+    load(data) {
+        super.load(data);
+        if (TypeUtil.isFiniteNumber(data.powerLevel)) {
+            this.powerLevel.set(data.powerLevel);
+        }
+    }
     // sendCreatePacket(serverIn: Server, client: undefined, msgObj = {}) {
     // const msgBase = { powerLevel: this.powerLevel };
     // super.sendCreatePacket(serverIn, client, msgBase);
@@ -4241,16 +4673,16 @@ class EntityEnemy extends EntityLiving {
     // return this;
     // }
     getAttackDamage() {
-        return this.powerLevel.get() * 3;
+        return this.powerLevel.get() * 10;
     }
     getMaxHealth() {
         return this.powerLevel.get() * 10;
     }
-    getPowerLevelByDistance(dis) {
+    static getPowerLevelByDistance(dis) {
         return Math.ceil(dis / 10);
     }
     setPowerLevelAndUpdate(dis) {
-        this.powerLevel.set(this.getPowerLevelByDistance(dis));
+        this.powerLevel.set(EntityEnemy.getPowerLevelByDistance(dis));
         //update Health
         const health = this.getMaxHealth();
         this.health.set(health);
@@ -4260,7 +4692,7 @@ class EntityEnemy extends EntityLiving {
     }
     setupDebugLineVertices(verticesData, partialTicks, clientIn, serverIn) {
         super.setupDebugLineVertices(verticesData, partialTicks, clientIn, serverIn);
-        dpath: if (Core.debugPathRender && serverIn != null) {
+        dpath: if (DebugUtil.debugPathRender && serverIn != null) {
             const serverEntity = serverIn.entities.getByUUID(this.uuid);
             if (serverEntity instanceof EntityEnemy == false)
                 break dpath;
@@ -4296,55 +4728,49 @@ class EntityEnemyOctopus extends EntityEnemy {
         this.shootCooldown = 0;
         this.shootEvent = this.syncManager.register(new EntityEventSyncProperty(Side.SERVER, EntityEnemyOctopus.SHOOT_EVENT_ID, data => this.shootAnimTick = SHOOT_ANIM_TICK, this));
     }
-    tick(gameIn) {
-        var _d;
-        super.tick(gameIn);
-        if (!((_d = this.target) === null || _d === void 0 ? void 0 : _d.isAlive()))
+    tick() {
+        var _c;
+        super.tick();
+        if (!((_c = this.target) === null || _c === void 0 ? void 0 : _c.isAlive()))
             this.target = null;
-        if (gameIn instanceof Server && this.isAlive()) {
+        if (this.gameIn instanceof Server && this.isAlive()) {
             if (this.shootCooldown <= 0 && this.target != null && this.getDistanceByEntity(this.target) < EntityEnemyOctopus.CAN_SHOOT_DISTANCE) {
-                this.shoot(gameIn);
+                this.shoot();
             }
             this.shootCooldown--;
         }
         this.shootAnimTick--;
     }
-    shoot(gameIn) {
+    shoot() {
         this.shootCooldown = 25;
-        if (gameIn instanceof Server) {
-            const entity = new EntityType.OCTOPUS_PROJECTILE(gameIn, this); // "this" is parent
-            entity.spawn(gameIn);
+        if (this.gameIn instanceof Server) {
+            const entity = new EntityEnemyOctopusProjectile(this.gameIn, this); // "this" is parent
+            entity.spawn();
             this.shootEvent.trigger(0);
             // this.sendEventPacket(gameIn, EntityEventTypes.OCTOPUS_SHOOT, 0)
         }
     }
-    recieveEventPacket(gameIn, id, data) {
-        super.recieveEventPacket(gameIn, id, data);
-        if (id == EntityEventTypes.OCTOPUS_SHOOT) {
-            this.shootAnimTick = SHOOT_ANIM_TICK;
-        }
-    }
     pathfindToEntity(target) {
+        const cubes = this.getCollides();
         const keepDistForPlayer = 3;
-        const distForPlayer = vec3.sub(vec3.create(), target.pos, this.pos);
-        const normal = vec3Util.tomul(vec3.normalize(vec3.create(), distForPlayer), -keepDistForPlayer);
-        const tracedPos = this.trace(target.pos, normal);
+        const normalForPlayer = vec3.normalize(vec3.create(), vec3.sub(vec3.create(), target.pos, this.pos));
+        // 符号を反転するのは敵からプレイヤーの向きからプレイヤーから敵の向きにへんかんするため
+        const normalAndDist = vec3Util.tomul(normalForPlayer, -keepDistForPlayer);
+        const tracedPos = this.trace(target.pos, normalAndDist, pos => this.isOnWall(pos[0], pos[1], pos[2], cubes));
         return this.pathfindTo(Math.round(tracedPos[0]), Math.round(tracedPos[2]));
     }
-    getRenderCubes(partialTicks) {
+    getRenderCubes(root, partialTicks) {
         let shootAnimTick = SHOOT_ANIM_TICK - this.shootAnimTick;
         if (shootAnimTick >= 0)
-            shootAnimTick + partialTicks;
+            shootAnimTick += partialTicks;
         if (shootAnimTick >= SHOOT_ANIM_TICK)
             shootAnimTick = 0;
         const d = Math.sin(shootAnimTick / SHOOT_ANIM_TICK * Math.PI * 2) / 4;
-        return [
-            new Cube(-8, 0, -8, 8, 16, 8).setTexture(64, 64, 0, 0).toScaled(1 + d, 1 - d, 1 + d),
-            new Cube(-2, 6, 8, 2, 10, 16).setTexture(64, 64, 0, 32).toScaled(1 + d, 1 - d, 1 + d)
-        ];
+        const body = root.add(new EntityCube(-2, 6, 8, 2, 10, 16).setTexture(64, 64, 0, 32).scale(1 + d, 1 - d, 1 + d));
+        const nose = body.add(new EntityCube(-8, 0, -8, 8, 16, 8).setTexture(64, 64, 0, 0).scale(1 + d, 1 - d, 1 + d));
     }
     getRenderTexture(partialTicks) {
-        return [textures.get("octopus")];
+        return [Renderer.textureOctopus];
     }
 }
 EntityEnemyOctopus.CAN_SHOOT_DISTANCE = 10;
@@ -4355,52 +4781,117 @@ class EntityEnemyOctopusProjectile extends Entity {
         this.powerLevel = this.syncManager.register(new EntityDataSyncProperty(Side.SERVER, EntityEnemy.POWER_LEVEL_ID, 1, this));
         // 引数があるのはサーバー側だけ
         if (owner != null) {
-            this.setPos(owner.pos[0], owner.pos[1], owner.pos[2]);
+            this.setPos3(owner.pos);
             this.rotation.set(owner.rotation.get());
             this.powerLevel.set(owner.powerLevel.get());
             this.owner = owner;
         }
     }
-    tick(gameIn) {
-        super.tick(gameIn);
+    tick() {
+        super.tick();
         const speed = 0.5;
         const radian = MathUtil.toRadian(this.rotation.get());
         const moveX = Math.sin(radian) * speed;
         const moveY = 0;
         const moveZ = Math.cos(radian) * speed;
         this.addVelocity(moveX, moveY, moveZ);
-        if (gameIn instanceof Server && this.bb != null) {
-            const hurtResult = gameIn.entities.getCollideWith(this.bb).getOnlyClass(EntityPlayer).hurtAll(this.getAttackDamage(), this, gameIn);
+        if (this.gameIn instanceof Server && this.bb != null) {
+            const hurtResult = this.gameIn.entities.getCollideWith(this.bb).getOnlyClass(EntityPlayer).hurtAll(this.getAttackDamage(), this);
             if (hurtResult) {
-                this.discardForHit(gameIn);
+                this.discardForHit();
             }
             if (this.wasCollision.x || this.wasCollision.y || this.wasCollision.z) {
-                this.discardForHit(gameIn);
+                this.discardForHit();
             }
         }
     }
-    discardForHit(serverIn) {
-        serverIn.spawnProjectileHitEffectEvent.trigger(this.pos, 0);
-        super.discard(serverIn);
+    discardForHit() {
+        this.gameIn.spawnProjectileHitEffectEvent.trigger(this.pos, 0);
+        super.discard();
     }
     getAttackDamage() {
         return this.powerLevel.get() * 0.2 + 1;
     }
-    getRenderCubes() {
-        return [
-            new Cube(-4, 0, -4, 4, 8, 4).setTexture(64, 64, 32, 32),
-        ];
+    getRenderCubes(root, partialTicks) {
+        const main = root.add(new EntityCube(-4, 0, -4, 4, 8, 4).setTexture(64, 64, 32, 32));
     }
     getRenderTexture() {
-        return [textures.get("octopus")];
+        return [Renderer.textureOctopus];
     }
     canDespawn() {
         return true;
     }
 }
+class EntityHealingObject extends EntityHurtable {
+    constructor() {
+        super(...arguments);
+        this.size = vec2.fromValues(1, 1);
+    }
+    canHurt(attacker) {
+        return attacker instanceof EntityPlayer;
+    }
+    hurt(damage, attacker) {
+        if (attacker instanceof EntityPlayer && this.gameIn instanceof Server) {
+            const entity = new EntityHealingEmitter(this.gameIn);
+            entity.setPos3(this.pos);
+            entity.spawn();
+            this.gameIn.spawnKillEffectEvent.trigger(this.pos, 1);
+            this.discard();
+            return true;
+        }
+        return false;
+    }
+    getRenderCubes(root, partialTicks) {
+        const leaf0 = root.add(new EntityCube(-8, 0, -4, -2, 1, 4).setTexture(64, 64, 0, 16));
+        const leaf1 = root.add(new EntityCube(2, 0, -4, 8, 1, 4).setTexture(64, 64, 0, 25));
+        const leaf2 = root.add(new EntityCube(-4, 0, -8, 4, 1, -2).setTexture(64, 64, 28, 18));
+        const leaf3 = root.add(new EntityCube(-4, 0, 2, 4, 1, 8).setTexture(64, 64, 28, 27));
+        const stem = root.add(new EntityCube(-2, 0, -2, 2, 12, 2).setTexture(64, 64, 32, 0));
+        const flower = stem.add(new EntityCube(-4, 11, -4, 4, 19, 4).setTexture(64, 64, 0, 0));
+    }
+    getRenderTexture() {
+        return [Renderer.textureHealing];
+    }
+    canDespawn() {
+        return true;
+    }
+}
+class EntityHealingEmitter extends Entity {
+    constructor() {
+        super(...arguments);
+        this.size = vec2.fromValues(1, 1);
+        this.areaRadius = 2;
+        this.lifetime = 50;
+    }
+    tick() {
+        super.tick();
+        if (this.ticksAlived >= this.lifetime)
+            this.discard();
+        if (this.ticksAlived % 5 == 0)
+            this.tryHeal();
+        if (this.gameIn instanceof Client) {
+            const particle = new ParticleHealth(this.gameIn, this.pos);
+            particle.spawn();
+        }
+    }
+    tryHeal() {
+        for (const player of this.gameIn.entities.getPlayers()) {
+            if (vec3.dist(this.pos, player.pos) < this.areaRadius) {
+                if (this.gameIn instanceof Server) {
+                    player.heal(vec3.sqrLen(this.pos) * 0.0002);
+                }
+                else if (this.gameIn instanceof Client) {
+                    const particle = new ParticleHealth(this.gameIn, this.pos);
+                    particle.spawn();
+                }
+            }
+        }
+    }
+}
 //#region Particle
 class Particle {
-    constructor(pos) {
+    constructor(clientIn, pos) {
+        this.clientIn = clientIn;
         this.wasCollision = new wasCollisionContext(false, false, false);
         this.bb = null;
         this.oldPos = vec3.fromValues(NaN, NaN, NaN);
@@ -4425,31 +4916,30 @@ class Particle {
         let offset = 0;
         verticesData.indices.push(...[0, 1, 2, 0, 2, 3].map(value => value + offset * 4));
     }
-    spawn(clientIn) {
-        var _d;
-        if (clientIn.particles.includes(this))
+    spawn() {
+        var _c;
+        if (this.clientIn.particles.includes(this))
             console.warn("particles ", this, " was double spawned");
-        (_d = this.uuid) !== null && _d !== void 0 ? _d : (this.uuid = crypto.randomUUID());
-        clientIn.particles.push(this);
-        // this.client = clientIn;
+        (_c = this.uuid) !== null && _c !== void 0 ? _c : (this.uuid = crypto.randomUUID());
+        this.clientIn.particles.push(this);
         return this;
     }
-    discard(clientIn) {
-        clientIn.particles.removeByInstance(this);
+    discard() {
+        this.clientIn.particles.removeByInstance(this);
         return true;
     }
-    tick(clientIn) {
+    tick() {
         this.oldPos[0] = this.pos[0];
         this.oldPos[1] = this.pos[1];
         this.oldPos[2] = this.pos[2];
-        this.travel(clientIn);
+        this.travel();
         this.frictionTick();
         this.move(this.velocity[0], this.velocity[1], this.velocity[2]);
         this.ticksExisted++;
         if (this.ticksExisted >= this.lifeTime)
-            this.discard(clientIn);
+            this.discard();
     }
-    travel(clientIn) {
+    travel() {
     }
     frictionTick() {
         const friction = this.getFriction();
@@ -4557,17 +5047,25 @@ class ParticleBillboard extends Particle {
     }
 }
 class ParticleAnimationBase extends ParticleBillboard {
-    constructor(pos) {
-        super(pos);
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
         this.lifeTime = this.getTickPerFrame() * this.getFrameAmount();
     }
-    getFrameOffset() { return 0; }
+    getFrameOffset() {
+        return 0;
+    }
     ;
-    getFrameSize() { return 8; }
+    getFrameSize() {
+        return 8;
+    }
     ;
-    getFrameAmount() { return 8; }
+    getFrameAmount() {
+        return 8;
+    }
     ;
-    getTickPerFrame() { return 2; }
+    getTickPerFrame() {
+        return 2;
+    }
     ;
     getTextureLeftTop(partialTicks) {
         const leftFramePos = Math.floor(this.ticksExisted / this.getTickPerFrame() + this.getFrameOffset()) * this.getFrameSize();
@@ -4575,8 +5073,8 @@ class ParticleAnimationBase extends ParticleBillboard {
     }
 }
 class ParticleSmokeBase extends ParticleAnimationBase {
-    constructor(pos) {
-        super(pos);
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
     }
     getFrameOffset() {
         return 0;
@@ -4589,8 +5087,8 @@ class ParticleSmokeBase extends ParticleAnimationBase {
     }
 }
 class ParticleSmokeSmallBase extends ParticleAnimationBase {
-    constructor(pos) {
-        super(pos);
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
     }
     getFrameOffset() {
         return 4;
@@ -4603,20 +5101,20 @@ class ParticleSmokeSmallBase extends ParticleAnimationBase {
     }
 }
 class ParticleDeathSmoke extends ParticleSmokeBase {
-    constructor(pos, size) {
-        super(pos);
+    constructor(clientIn, pos, size) {
+        super(clientIn, pos);
         this.velocity = vec3.random(vec3.create(), size / 3);
     }
-    travel(clientIn) {
+    travel() {
         this.velocity[1] += 0.05;
     }
 }
 class ParticleDeathSmokeSmall extends ParticleSmokeSmallBase {
-    constructor(pos, size) {
-        super(pos);
+    constructor(clientIn, pos, size) {
+        super(clientIn, pos);
         this.velocity = vec3.random(vec3.create(), size / 3);
     }
-    travel(clientIn) {
+    travel() {
         this.velocity[1] += 0.05;
     }
     getSpriteSize(partialTicks) {
@@ -4624,15 +5122,15 @@ class ParticleDeathSmokeSmall extends ParticleSmokeSmallBase {
     }
 }
 class ParticleProjectileHit extends ParticleSmokeSmallBase {
-    constructor(pos, size) {
-        super(pos);
+    constructor(clientIn, pos, size) {
+        super(clientIn, pos);
         const color = 0.25;
         this.textureColor = vec4.fromValues(color, color, color, 1);
     }
 }
 class ParticleSprintFire extends ParticleBillboard {
-    constructor(pos, velocity) {
-        super(pos);
+    constructor(clientIn, pos, velocity) {
+        super(clientIn, pos);
         this.frameAbount = 8;
         this.tickPerFrame = 2;
         this.velocity = velocity;
@@ -4646,8 +5144,8 @@ class ParticleSprintFire extends ParticleBillboard {
     }
 }
 class ParticleSprintSmoke extends ParticleSmokeSmallBase {
-    constructor(pos) {
-        super(pos);
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
         this.velocity = vec3.random(vec3.create(), 1);
         this.lifeTime = 5;
         this.textureColor = vec4.fromValues(Math.random(), 0, 0, 1);
@@ -4659,8 +5157,8 @@ class ParticleSprintSmoke extends ParticleSmokeSmallBase {
     }
 }
 class ParticleXpShadow extends ParticleBillboard {
-    constructor(pos) {
-        super(pos);
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
         this.textureLeftTop = vec2.fromValues(8, 8);
         this.lifeTime = 10;
     }
@@ -4679,10 +5177,21 @@ class ParticleXpShadow extends ParticleBillboard {
         return 1 - Easing.easeOutExpo(this.getSize(partialTicks));
     }
 }
+class ParticleHealth extends ParticleBillboard {
+    constructor(clientIn, pos) {
+        super(clientIn, pos);
+        this.velocity = vec3.random(vec3.create(), 1);
+        this.textureLeftTop = vec2.fromValues(16, 8);
+        this.lifeTime = 10;
+    }
+    tick() {
+        super.tick();
+    }
+}
 class Registry extends Map {
     getKey(searchValue) {
-        var _d, _e;
-        return (_e = (_d = Array.from(this.entries()).find(([key, value]) => value === searchValue)) === null || _d === void 0 ? void 0 : _d[0]) !== null && _e !== void 0 ? _e : null;
+        var _c, _d;
+        return (_d = (_c = Array.from(this.entries()).find(([key, value]) => value === searchValue)) === null || _c === void 0 ? void 0 : _c[0]) !== null && _d !== void 0 ? _d : null;
     }
     set(key, value) {
         let a = super.set(key, value);
@@ -4746,11 +5255,18 @@ EntityType.registry = new RegistryEntityType;
 EntityType.OCTOPUS = _a.registry.register(0x00, EntityEnemyOctopus);
 EntityType.OCTOPUS_PROJECTILE = _a.registry.register(0x01, EntityEnemyOctopusProjectile);
 EntityType.XP = _a.registry.register(0x10, EntityXp);
+EntityType.HEALING_OBJ = _a.registry.register(0x11, EntityHealingObject);
+EntityType.HEALING_EMIT = _a.registry.register(0x12, EntityHealingEmitter);
 class LevelUtil {
     static isOnWall(pos, rot) {
         const seed = SeededRandom.generateSeed(pos[0], pos[1]);
         const rng = new SeededRandom(seed);
         return this.roomWallTypes2[Math.abs(Math.floor(rng.random() * 40)) % 3][rot.getHorizontalIndex()] == 1;
+    }
+    static shouldPlacePillar(x, z) {
+        const seed = SeededRandom.generateSeed(x, z);
+        const rng = new SeededRandom(seed);
+        return rng.random() < this.PILLAR_CHANCE;
     }
     static getCubes(centerPos, range, isHitbox) {
         const cubes = new Array;
@@ -4775,58 +5291,37 @@ class LevelUtil {
         for (const terrainCube of isHitbox ? this.roomFloorHitbox.main : this.roomFloorCubes.main) {
             cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
         }
-        for (const levelCube of this.getWallCube(pos, isHitbox)) {
+        for (const levelCube of this.getWallCubeNew(pos, isHitbox)) {
             cubes.push(levelCube);
         }
         return cubes;
     }
-    static getWallCube(pos, isHitbox) {
+    static getWallCubeNew(pos, isHitbox) {
         const cubes = new Array;
-        for (const terrainCube of isHitbox ? this.roomPillarHitbox.main : this.roomPillarCubes.main) {
-            cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
-        }
-        // if (this.shouldAddPollar(pos)) {
-        // for (const terrainCube of isHitbox ? this.roomPillar2Hitbox.main : this.roomPillar2Cubes.main) {
-        // cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
-        // }
-        // }
-        if (this.shouldAddWallSide(pos, Facing.NORTH)) {
-            for (const terrainCube of isHitbox ? this.roomWallNorthHitbox.main : this.roomWallNorthCubes.main) {
-                cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
+        const seed = SeededRandom.generateSeed(pos[0], pos[1]);
+        const rng = new SeededRandom(seed);
+        rng.random();
+        if (this.shouldPlacePillar(pos[0], pos[1])) {
+            this.addCubes(cubes, pos, isHitbox ? this.roomPillar2Hitbox.main : this.roomPillar2Cubes.main);
+            if (this.shouldPlacePillar(pos[0], pos[1] - 1) && rng.random() < this.WALL_CHANCE) {
+                this.addCubes(cubes, pos, isHitbox ? this.roomWallNorth2Hitbox.main : this.roomWallNorth2Cubes.main);
             }
-        }
-        if (this.shouldAddWallSide(pos, Facing.SOUTH)) {
-            for (const terrainCube of isHitbox ? this.roomWallSouthHitbox.main : this.roomWallSouthCubes.main) {
-                cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
+            if (this.shouldPlacePillar(pos[0], pos[1] + 1) && rng.random() < this.WALL_CHANCE) {
+                this.addCubes(cubes, pos, isHitbox ? this.roomWallSouth2Hitbox.main : this.roomWallSouth2Cubes.main);
             }
-        }
-        if (this.shouldAddWallSide(pos, Facing.EAST)) {
-            for (const terrainCube of isHitbox ? this.roomWallEastHitbox.main : this.roomWallEastCubes.main) {
-                cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
+            if (this.shouldPlacePillar(pos[0] - 1, pos[1]) && rng.random() < this.WALL_CHANCE) {
+                this.addCubes(cubes, pos, isHitbox ? this.roomWallWest2Hitbox.main : this.roomWallWest2Cubes.main);
             }
-        }
-        if (this.shouldAddWallSide(pos, Facing.WEST)) {
-            for (const terrainCube of isHitbox ? this.roomWallWestHitbox.main : this.roomWallWestCubes.main) {
-                cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth, 0, pos[1] * this.roomWidth));
+            if (this.shouldPlacePillar(pos[0] + 1, pos[1]) && rng.random() < this.WALL_CHANCE) {
+                this.addCubes(cubes, pos, isHitbox ? this.roomWallEast2Hitbox.main : this.roomWallEast2Cubes.main);
             }
         }
         return cubes;
     }
-    static shouldAddWallSide(pos, facing) {
-        // return pos[0] == 0 && (facing == Facing.SOUTH || facing == Facing.NORTH);
-        const oppesite = facing.getOppesite();
-        return this.isOnWall(pos, facing) && this.isOnWall(oppesite.getHorizontalMoved(pos), oppesite);
-    }
-    static shouldAddPollar(pos) {
-        if (this.shouldAddWallSide(vec2Util.toadd(pos, -1, -1), Facing.NORTH))
-            return true;
-        if (this.shouldAddWallSide(vec2Util.toadd(pos, 0, -1), Facing.WEST))
-            return true;
-        if (this.shouldAddWallSide(vec2Util.toadd(pos, 0, 0), Facing.SOUTH))
-            return true;
-        if (this.shouldAddWallSide(vec2Util.toadd(pos, -1, 0), Facing.EAST))
-            return true;
-        return false;
+    static addCubes(cubes, pos, terrainCubes) {
+        for (const terrainCube of terrainCubes) {
+            cubes.push(terrainCube.toMoved(pos[0] * this.roomWidth + this.roomWidth / 2, 0, pos[1] * this.roomWidth + this.roomWidth / 2));
+        }
     }
     static getCircle(range, offset = vec2.fromValues(0, 0)) {
         const dots = new Array;
@@ -4849,110 +5344,54 @@ LevelUtil.roomFloorHitbox = {
         new AABB(-5, -0.5, -5, 5, 0, 5),
     ]
 };
-LevelUtil.roomPillarCubes = {
-    main: [
-        new CubeTile(-5, -0.5, -5, -3, 5, -3, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b101010)),
-        new CubeTile(3, -0.5, -5, 5, 5, -3, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b101001)),
-        new CubeTile(-5, -0.5, 3, -3, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b011010)),
-        new CubeTile(3, -0.5, 3, 5, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b011001)),
-    ]
-};
-LevelUtil.roomPillarHitbox = {
-    main: [
-        new AABB(-5, -0.5, -5, -3, 5, -3),
-        new AABB(3, -0.5, -5, 5, 5, -3),
-        new AABB(-5, -0.5, 3, -3, 5, 5),
-        new AABB(3, -0.5, 3, 5, 5, 5),
-    ]
-};
 LevelUtil.roomPillar2Cubes = {
     main: [
-        new CubeTile(-7, -0.5, -7, -3, 5, -3, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+        new CubeTile(-2, -0.5, -2, 2, 5, 2, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+    ]
+};
+LevelUtil.roomWallEast2Cubes = {
+    main: [
+        new CubeTile(-1, -0.5, -1, 10, 5, 1, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+    ]
+};
+LevelUtil.roomWallEast2Hitbox = {
+    main: [
+        new AABB(-1, -0.5, -1, 10, 5, 1),
+    ]
+};
+LevelUtil.roomWallWest2Cubes = {
+    main: [
+        new CubeTile(-10, -0.5, -1, 1, 5, 1, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+    ]
+};
+LevelUtil.roomWallWest2Hitbox = {
+    main: [
+        new AABB(-10, -0.5, -1, 1, 5, 1),
+    ]
+};
+LevelUtil.roomWallNorth2Cubes = {
+    main: [
+        new CubeTile(-1, -0.5, -10, 1, 5, 1, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+    ]
+};
+LevelUtil.roomWallNorth2Hitbox = {
+    main: [
+        new AABB(-1, -0.5, -10, 1, 5, 1),
+    ]
+};
+LevelUtil.roomWallSouth2Cubes = {
+    main: [
+        new CubeTile(-1, -0.5, -1, 1, 5, 10, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b111011)),
+    ]
+};
+LevelUtil.roomWallSouth2Hitbox = {
+    main: [
+        new AABB(-1, -0.5, -1, 1, 5, 10),
     ]
 };
 LevelUtil.roomPillar2Hitbox = {
     main: [
-        new AABB(-7, -0.5, -7, -3, 5, -3),
-    ]
-};
-LevelUtil.roomPillarNorthWestCubes = {
-    main: [
-        new CubeTile(-5, -0.5, -5, -3, 5, -3, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b101010)),
-    ]
-};
-LevelUtil.roomPillarNorthWestHitbox = {
-    main: [
-        new AABB(-5, -0.5, -5, -3, 5, -3),
-    ]
-};
-LevelUtil.roomPillarNorthEastCubes = {
-    main: [
-        new CubeTile(3, -0.5, -5, 5, 5, -3, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b101001)),
-    ]
-};
-LevelUtil.roomPillarNorthEastHitbox = {
-    main: [
-        new AABB(3, -0.5, -5, 5, 5, -3),
-    ]
-};
-LevelUtil.roomPillarSouthWestCubes = {
-    main: [
-        new CubeTile(-5, -0.5, 3, -3, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b011010)),
-    ]
-};
-LevelUtil.roomPillarSouthWestHitbox = {
-    main: [
-        new AABB(-5, -0.5, 3, -3, 5, 5),
-    ]
-};
-LevelUtil.roomPillarSouthEastCubes = {
-    main: [
-        new CubeTile(3, -0.5, 3, 5, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b011001)),
-    ]
-};
-LevelUtil.roomPillarSouthEastHitbox = {
-    main: [
-        new AABB(3, -0.5, 3, 5, 5, 5),
-    ]
-};
-LevelUtil.roomWallNorthCubes = {
-    main: [
-        new CubeTile(-5, -0.5, -5, 5, 5, -4, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b101000)),
-    ]
-};
-LevelUtil.roomWallNorthHitbox = {
-    main: [
-        new AABB(-5, -0.5, -5, 5, 5, -4),
-    ]
-};
-LevelUtil.roomWallSouthCubes = {
-    main: [
-        new CubeTile(-5, -0.5, 4, 5, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b011000)),
-    ]
-};
-LevelUtil.roomWallSouthHitbox = {
-    main: [
-        new AABB(-5, -0.5, 4, 5, 5, 5),
-    ]
-};
-LevelUtil.roomWallEastCubes = {
-    main: [
-        new CubeTile(-5, -0.5, -5, -4, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b001010)),
-    ]
-};
-LevelUtil.roomWallEastHitbox = {
-    main: [
-        new AABB(-5, -0.5, -5, -4, 5, 5),
-    ]
-};
-LevelUtil.roomWallWestCubes = {
-    main: [
-        new CubeTile(4, -0.5, -5, 5, 5, 5, ...CubeTile.getFilteredTextures(CubeTile.textureStoneWall, 0b001001)),
-    ]
-};
-LevelUtil.roomWallWestHitbox = {
-    main: [
-        new AABB(4, -0.5, -5, 5, 5, 5),
+        new AABB(-2, -0.5, -2, 2, 5, 2),
     ]
 };
 LevelUtil.roomWallTypes1 = [
@@ -4977,47 +5416,9 @@ LevelUtil.roomWallTypes3 = [
 LevelUtil.roomWidth = 10;
 LevelUtil.levelCacheCube = new Map;
 LevelUtil.levelCacheHitbox = new Map;
+LevelUtil.PILLAR_CHANCE = 0.75;
+LevelUtil.WALL_CHANCE = 0.25;
 class SaveType {
-}
-class SaveTypeIndexedDB extends SaveType {
-    init() {
-        const request = indexedDB.open("GameDB", 1);
-        request.onupgradeneeded = event => {
-            let db = event.target.result;
-            db.createObjectStore("saves", { keyPath: "name" });
-        };
-    }
-    save(name, json) {
-        return __awaiter(this, void 0, void 0, function* () {
-            return new Promise((resolve, reject) => {
-                const dbRequest = indexedDB.open("GameDB", 1);
-                dbRequest.onsuccess = function (event) {
-                    let db = event.target.result;
-                    let transaction = db.transaction("saves", "readwrite");
-                    let store = transaction.objectStore("saves");
-                    store.put({ name, json });
-                    dbRequest.onsuccess = () => resolve();
-                    dbRequest.onerror = () => reject(dbRequest.error);
-                };
-            });
-        });
-    }
-    load(name) {
-        return __awaiter(this, void 0, void 0, function* () {
-            return new Promise((resolve, reject) => {
-                const dbRequest = indexedDB.open("GameDB", 1);
-                dbRequest.onsuccess = function (event) {
-                    let db = event.target.result;
-                    let transaction = db.transaction("saves", "readonly");
-                    let store = transaction.objectStore("saves");
-                    let getData = store.get(name);
-                    getData.onsuccess = () => { var _d; return resolve(((_d = getData.result) === null || _d === void 0 ? void 0 : _d.json) || null); };
-                    getData.onerror = () => reject(getData.error);
-                };
-                dbRequest.onerror = () => reject(dbRequest.error);
-            });
-        });
-    }
     loadIfAbsent(name, defaultObj) {
         return __awaiter(this, void 0, void 0, function* () {
             let loadeddata = yield this.load(name);
@@ -5026,15 +5427,115 @@ class SaveTypeIndexedDB extends SaveType {
             return defaultObj;
         });
     }
+    getDBName() {
+        return "GameDB";
+    }
+    getStoreName() {
+        return "saves";
+    }
+}
+class SaveTypeNodeServer extends SaveType {
+    init() {
+    }
+    save(id, json) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const filePath = this.getFilePath(id);
+            const fileHandle = yield fs.promises.open(filePath, 'w+');
+            yield fileHandle.writeFile(JSON.stringify(json));
+            yield fileHandle.close();
+        });
+    }
+    load(id) {
+        return __awaiter(this, void 0, void 0, function* () {
+            const filePath = this.getFilePath(id);
+            const fileHandle = yield fs.promises.open(filePath, 'r+');
+            const data = yield fileHandle.readFile();
+            yield fileHandle.close();
+            try {
+                return JSON.parse(data.toString());
+            }
+            catch (e) {
+                return null;
+            }
+        });
+    }
+    getFilePath(name) {
+        return path.join(__dirname, this.getDBName(), this.getStoreName(), name + ".json");
+    }
+}
+class SaveTypeIndexedDB extends SaveType {
+    init() {
+        const request = indexedDB.open(this.getDBName(), 1);
+        request.onupgradeneeded = event => {
+            let db = event.target.result;
+            if (!db.objectStoreNames.contains(this.getStoreName())) {
+                db.createObjectStore(this.getStoreName(), { keyPath: 'name' });
+            }
+        };
+    }
+    save(name, json) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return new Promise((resolve, reject) => {
+                const dbRequest = indexedDB.open(this.getDBName(), 1);
+                dbRequest.onsuccess = e => {
+                    let db = e.target.result;
+                    let transaction = db.transaction(this.getStoreName(), "readwrite");
+                    let store = transaction.objectStore(this.getStoreName());
+                    const putRequest = store.put({ name, json });
+                    putRequest.onsuccess = () => resolve();
+                    putRequest.onerror = () => reject(putRequest.error);
+                };
+                dbRequest.onerror = () => reject(dbRequest.error);
+            });
+        });
+    }
+    load(name) {
+        return __awaiter(this, void 0, void 0, function* () {
+            return new Promise((resolve, reject) => {
+                const dbRequest = indexedDB.open(this.getDBName(), 1);
+                dbRequest.onsuccess = e => {
+                    let db = e.target.result;
+                    let transaction = db.transaction(this.getStoreName(), "readonly");
+                    let store = transaction.objectStore(this.getStoreName());
+                    const getRequest = store.get(name);
+                    getRequest.onsuccess = () => { var _c; return resolve(((_c = getRequest.result) === null || _c === void 0 ? void 0 : _c.json) || null); };
+                    getRequest.onerror = () => reject(getRequest.error);
+                };
+                dbRequest.onerror = () => reject(dbRequest.error);
+            });
+        });
+    }
 }
 class IllegalArgmentExeption extends Error {
 }
-class SaveDataIllegalArgmentExeption extends Error {
+class SaveDataIllegalArgmentExeption extends IllegalArgmentExeption {
 }
 class SaveHandler {
     constructor(serverIn) {
         this.serverIn = serverIn;
-        this.saveType = new SaveTypeIndexedDB;
+        this.saveType = isDedicatedServer ? new SaveTypeNodeServer : new SaveTypeIndexedDB; // temporary
+        this.lastVersion = 0;
+        this.allPlayers = {};
+        this.wasAllPlayersLoaded = false;
+    }
+    saveAll() {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.init();
+            yield this.saveEntities();
+            yield this.saveAllPlayers();
+        });
+    }
+    loadAll() {
+        return __awaiter(this, void 0, void 0, function* () {
+            yield this.init();
+            yield this.initPlayers();
+            yield this.loadAndSpawnEntities();
+        });
+    }
+    init() {
+        return __awaiter(this, void 0, void 0, function* () {
+            this.saveType.init();
+        });
     }
     saveEntities() {
         return __awaiter(this, void 0, void 0, function* () {
@@ -5047,30 +5548,43 @@ class SaveHandler {
                 entities.push(data);
             }
             const jsonObj = { entities, version: SaveHandler.VERSION };
-            this.saveType.save(SaveHandler.ENTITY_ID, jsonObj);
+            yield this.saveType.save(SaveHandler.ENTITY_ID, jsonObj);
             return jsonObj;
         });
     }
     saveAllPlayers() {
         return __awaiter(this, void 0, void 0, function* () {
-            let loadeddata = yield this.saveType.loadIfAbsent(SaveHandler.PLAYER_ID, {});
-            const players = loadeddata;
             for (const entity of this.serverIn.entities.getPlayers()) {
-                const data = {};
-                entity.save(data);
-                players[entity.uuid] = data;
+                yield this.savePlayer(entity, false);
             }
-            const jsonObj = { players, version: SaveHandler.VERSION };
-            this.saveType.save(SaveHandler.PLAYER_ID, jsonObj);
+            const jsonObj = { players: this.allPlayers, version: SaveHandler.VERSION };
+            yield this.saveType.save(SaveHandler.PLAYER_ID, jsonObj);
             return jsonObj;
+        });
+    }
+    savePlayer(player_1) {
+        return __awaiter(this, arguments, void 0, function* (player, doSave = true) {
+            const data = {};
+            player.save(data);
+            this.allPlayers[player.uuid] = data;
+            const jsonObj = { players: this.allPlayers, version: SaveHandler.VERSION };
+            if (doSave) {
+                yield this.saveType.save(SaveHandler.PLAYER_ID, jsonObj);
+            }
+            return jsonObj;
+        });
+    }
+    initPlayers() {
+        return __awaiter(this, void 0, void 0, function* () {
+            var _c;
+            let loadeddata = yield this.saveType.loadIfAbsent(SaveHandler.PLAYER_ID, {});
+            this.allPlayers = (_c = loadeddata.players) !== null && _c !== void 0 ? _c : {};
         });
     }
     loadAndSpawnEntities() {
         return __awaiter(this, void 0, void 0, function* () {
-            const loadedData = yield this.saveType.load(SaveHandler.ENTITY_ID);
-            if (!SaveHandler.isSuccessLoad(loadedData))
-                return;
-            let { entities, version } = loadedData;
+            const loadedData = yield this.saveType.loadIfAbsent(SaveHandler.ENTITY_ID, {});
+            let { entities = [], version } = loadedData;
             if (!Array.isArray(entities))
                 throw new SaveDataIllegalArgmentExeption();
             for (const data of entities) {
@@ -5082,14 +5596,15 @@ class SaveHandler {
                 if (entityClass == null)
                     continue;
                 const entity = new entityClass(this.serverIn);
-                entity.load(data, version);
-                entity.spawn(this.serverIn);
+                entity.load(data);
+                entity.spawn();
             }
         });
     }
-    loadAndInitPlayer(player, { players, version }) {
-        const data = players[player.uuid];
-        player.load(data, version);
+    loadAndInitPlayer(player) {
+        var _c;
+        const data = (_c = this.allPlayers[player.uuid]) !== null && _c !== void 0 ? _c : {};
+        player.load(data);
     }
     static isSuccessLoad(data) {
         return !(data instanceof DOMException) && data != null;
@@ -5141,6 +5656,7 @@ class Renderer {
     static canvasInit(canvas) {
         const gl = canvas.getContext("webgl");
         if (gl == null) {
+            alert("WebGL context initialize error");
             throw new Error("WebGL context not available");
         }
         this.buffersTerrain = RegacyRenderer.initBuffers(gl);
@@ -5162,6 +5678,7 @@ class Renderer {
         this.textureParticles = this.registerTexture(textures, "partiicles", gl, "textures/particles.png");
         this.textureOctopus = this.registerTexture(textures, "octopus", gl, "textures/entities/octopus.png");
         this.textureXp = this.registerTexture(textures, "xp", gl, "textures/entities/xp.png");
+        this.textureHealing = this.registerTexture(textures, "healing", gl, "textures/entities/healing.png");
         this.textureTitleBg = this.registerTexture(textures, "title", gl, "terrain.png");
         this.textureText = this.registerTexture(textures, "text", gl, "textures/text/text.png");
         this.TextureGui = this.registerTexture(textures, "gui", gl, "textures/gui.png");
@@ -5175,32 +5692,33 @@ class Renderer {
             return;
         GuiRenderer.initBuffersUpdate(gl, Renderer.buffersUi, gui, partialTicks);
         GuiRenderer.drawUi(gl, Renderer.programInfoUi, Renderer.buffersUi, [Renderer.TextureGui, Renderer.textureNewText]);
-        if (!Core.debugGuiRect)
+        if (!DebugUtil.debugGuiRect)
             return;
         GuiDebugRenderer.initBuffersUpdate(gl, Renderer.buffersUiDebug, gui, partialTicks);
         GuiDebugRenderer.drawUi(gl, Renderer.programInfoUiDebug, Renderer.buffersUiDebug);
     }
     static renderInGame(client) {
-        var _d, _e;
+        var _c, _d;
         const gl = client.gl;
         const partialTicks = client.partialTicks;
+        const cam = client.camInGame;
         this.updateFov(client, partialTicks);
         RegacyRenderer.initBuffersUpdate(gl, Renderer.buffersTerrain, LevelUtil.getCubes(vec3Util.getXY(client.entityPlayer.pos), 5, false));
-        RegacyRenderer.drawScene(gl, Renderer.programInfo, Renderer.buffersTerrain, [Renderer.textureStone, Renderer.textureStoneWall], vec3.fromValues(0, 0, 0), { cam: client.cam, partialTicks, enableFaceCulling: true });
-        ParticleRenderer.initBuffersUpdate(gl, Renderer.buffersParticle, client.particles, partialTicks, client.cam);
-        ParticleRenderer.drawParticle(gl, Renderer.programInfoPtc, Renderer.buffersParticle, Renderer.textureParticles, partialTicks, client.cam);
-        if (Core.debugLinesRender) {
+        RegacyRenderer.drawScene(gl, Renderer.programInfo, Renderer.buffersTerrain, [Renderer.textureStone, Renderer.textureStoneWall], vec3.fromValues(0, 0, 0), { cam: cam, partialTicks, enableFaceCulling: true });
+        ParticleRenderer.initBuffersUpdate(gl, Renderer.buffersParticle, client.particles, partialTicks, cam);
+        ParticleRenderer.drawParticle(gl, Renderer.programInfoPtc, Renderer.buffersParticle, Renderer.textureParticles, partialTicks, cam);
+        if (DebugUtil.debugLinesRender) {
             DebugRenderer.initBuffersUpdate(gl, Renderer.buffersDebug, client.entities, partialTicks, client, client.isOffline ? client.integratedServer : null);
-            DebugRenderer.drawEntity(gl, Renderer.programInfoDebug, Renderer.buffersDebug, partialTicks, client.cam);
+            DebugRenderer.drawEntity(gl, Renderer.programInfoDebug, Renderer.buffersDebug, partialTicks, cam);
         }
         for (const entity of client.entities.filter((e) => e.ticksAlived > 1)) {
-            EntityRenderer.initBuffersUpdate(gl, Renderer.buffersPlayer, entity, partialTicks, client.cam);
-            const renderPos = (_d = entity.getRenderPos(partialTicks)) !== null && _d !== void 0 ? _d : vec3.fromValues(0, 0, 0);
-            EntityRenderer.drawEntity(gl, Renderer.programInfo, Renderer.buffersPlayer, entity.getRenderTexture(partialTicks), renderPos, entity.getRenderRotation(partialTicks), vec3.fromValues(Entity.BASE_SCALE, Entity.BASE_SCALE, Entity.BASE_SCALE), partialTicks, client.cam, entity.getRenderOverlayColor(partialTicks), entity.getGrovalAlpha(partialTicks));
+            EntityRenderer.initBuffersUpdate(gl, Renderer.buffersPlayer, entity, partialTicks, cam);
+            const renderPos = (_c = entity.getRenderPos(partialTicks)) !== null && _c !== void 0 ? _c : vec3.fromValues(0, 0, 0);
+            EntityRenderer.drawEntity(gl, Renderer.programInfo, Renderer.buffersPlayer, entity.getRenderTexture(partialTicks), renderPos, entity.getRenderRotation(partialTicks), vec3.fromValues(Entity.BASE_SCALE, Entity.BASE_SCALE, Entity.BASE_SCALE), partialTicks, cam, entity.getRenderOverlayColor(partialTicks), entity.getGrovalAlpha(partialTicks));
             const text = entity.getScreenText();
             if (text != null) {
-                RegacyRenderer.initBuffersUpdate(gl, Renderer.buffersPlayer, RegacyRenderer.scalingCubes(RegacyRenderer.getEntityTextCube((_e = entity.getScreenText()) !== null && _e !== void 0 ? _e : ""), entity.getScale()));
-                RegacyRenderer.drawScene(gl, Renderer.programInfo, Renderer.buffersPlayer, [Renderer.textureText], vec3.fromValues(renderPos[0], renderPos[1], renderPos[2]), { cam: client.cam, entityIn: entity, partialTicks, enableAlpha: true }, vec3.fromValues(0, client.cam.dir[1], 0));
+                RegacyRenderer.initBuffersUpdate(gl, Renderer.buffersPlayer, RegacyRenderer.scalingCubes(RegacyRenderer.getEntityTextCube((_d = entity.getScreenText()) !== null && _d !== void 0 ? _d : ""), entity.getScale()));
+                RegacyRenderer.drawScene(gl, Renderer.programInfo, Renderer.buffersPlayer, [Renderer.textureText], vec3.fromValues(renderPos[0], renderPos[1], renderPos[2]), { cam: cam, entityIn: entity, partialTicks, enableAlpha: true }, vec3.fromValues(0, cam.dir[1], 0));
             }
         }
         Renderer.drawGui(gl, client.guiHud, partialTicks);
@@ -5210,6 +5728,7 @@ class Renderer {
     static renderTitle(client) {
         const gl = client.gl;
         const partialTicks = client.partialTicks;
+        const cam = client.getCamInScene();
         RegacyRenderer.initBuffersUpdate(gl, Renderer.buffersTerrain, LevelUtil.getCubes(vec2.fromValues(0, 0), 5, false));
         RegacyRenderer.drawScene(gl, Renderer.programInfo, Renderer.buffersTerrain, [Renderer.textureStone, Renderer.textureStoneWall], vec3.fromValues(0, 0, 0), { cam: client.camTitle, partialTicks });
     }
@@ -5478,7 +5997,7 @@ Renderer.guiRender = (client) => {
     if (client.currentGui != null) {
         Renderer.drawGui(gl, client.currentGui, partialTicks);
     }
-    if (Core.debugtext) {
+    if (DebugUtil.debugtext) {
         Renderer.drawGui(gl, client.guiDebug, partialTicks);
     }
 };
@@ -5488,9 +6007,9 @@ Renderer.cubesTitleBg = [
 Renderer.fov = 60;
 class RegacyRenderer {
     static drawScene(gl, programInfo, buffers, textures, cubePosition, { cam, entityIn, partialTicks, overlayColor: color = vec4.fromValues(1, 1, 1, 0), grovalAlpha = 1, enableAlpha = false, enableFaceCulling = true }, rotation = vec3.fromValues(0, 0, 0)) {
-        var _d, _e, _f;
+        var _c, _d, _e;
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling && enableFaceCulling)
+        if (DebugUtil.debugfaceCulling && enableFaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -5509,8 +6028,8 @@ class RegacyRenderer {
         const zFar = 100.0;
         const projectionMatrix = mat4.create();
         const modelViewMatrix = mat4.create();
-        const camDir = cam.getRenderDir(partialTicks);
-        const camPos = cam.getRenderPos(partialTicks);
+        const camDir = cam.dir;
+        const camPos = cam.pos;
         var yaw = MathUtil.toRadian(camDir[1]);
         var pitch = MathUtil.toRadian(camDir[0]);
         var roll = MathUtil.toRadian(camDir[2]);
@@ -5525,9 +6044,9 @@ class RegacyRenderer {
         mat4.lookAt(modelViewMatrix, vec3.create(), lookAtPoint, upDirection);
         mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
         mat4.translate(modelViewMatrix, modelViewMatrix, vec3.subtract(vec3.create(), cubePosition, cameraVertexPosition));
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_d = rotation[0]) !== null && _d !== void 0 ? _d : 0), [1, 0, 0]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_e = rotation[1]) !== null && _e !== void 0 ? _e : 0), [0, 1, 0]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_f = rotation[2]) !== null && _f !== void 0 ? _f : 0), [0, 0, 1]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_c = rotation[0]) !== null && _c !== void 0 ? _c : 0), [1, 0, 0]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_d = rotation[1]) !== null && _d !== void 0 ? _d : 0), [0, 1, 0]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_e = rotation[2]) !== null && _e !== void 0 ? _e : 0), [0, 0, 1]);
         Renderer.setPositionAttribute(gl, buffers, programInfo);
         Renderer.setTextureAttribute(gl, buffers, programInfo);
         Renderer.setTextureVariousAttribute(gl, buffers, programInfo);
@@ -5945,7 +6464,7 @@ RegacyRenderer.regacyTextTexturePos = {
 class ParticleRenderer {
     static drawParticle(gl, programInfo, buffers, texture, partialTicks, cam) {
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling)
+        if (DebugUtil.debugfaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -5959,8 +6478,8 @@ class ParticleRenderer {
         const zFar = 100.0;
         const projectionMatrix = mat4.create();
         const modelViewMatrix = mat4.create();
-        const camDir = cam.getRenderDir(partialTicks);
-        const camPos = cam.getRenderPos(partialTicks);
+        const camDir = cam.dir;
+        const camPos = cam.pos;
         var yaw = MathUtil.toRadian(camDir[1]);
         var pitch = MathUtil.toRadian(camDir[0]);
         var roll = MathUtil.toRadian(camDir[2]);
@@ -6104,7 +6623,7 @@ class ParticleRenderer {
 class DebugRenderer {
     static drawEntity(gl, programInfo, buffers, partialTicks, cam) {
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling)
+        if (DebugUtil.debugfaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -6118,8 +6637,8 @@ class DebugRenderer {
         const zFar = 100.0;
         const projectionMatrix = mat4.create();
         const modelViewMatrix = mat4.create();
-        const camDir = cam.getRenderDir(partialTicks);
-        const camPos = cam.getRenderPos(partialTicks);
+        const camDir = cam.dir;
+        const camPos = cam.pos;
         var yaw = MathUtil.toRadian(camDir[1]);
         var pitch = MathUtil.toRadian(camDir[0]);
         var roll = MathUtil.toRadian(camDir[2]);
@@ -6213,9 +6732,9 @@ class DebugRenderer {
 }
 class EntityRenderer {
     static drawEntity(gl, programInfo, buffers, textures, position, rotation, scale, partialTicks, cam, overlayColor, grovalAlpha) {
-        var _d, _e, _f;
+        var _c, _d, _e;
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling)
+        if (DebugUtil.debugfaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -6229,8 +6748,8 @@ class EntityRenderer {
         const zFar = 100.0;
         const projectionMatrix = mat4.create();
         const modelViewMatrix = mat4.create();
-        const camDir = cam.getRenderDir(partialTicks);
-        const camPos = cam.getRenderPos(partialTicks);
+        const camDir = cam.dir;
+        const camPos = cam.pos;
         var yaw = MathUtil.toRadian(camDir[1]);
         var pitch = MathUtil.toRadian(camDir[0]);
         var roll = MathUtil.toRadian(camDir[2]);
@@ -6245,9 +6764,9 @@ class EntityRenderer {
         mat4.lookAt(modelViewMatrix, cameraVertexPosition, lookAtPoint, upDirection);
         mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
         mat4.translate(modelViewMatrix, modelViewMatrix, vec3.fromValues(position[0], position[1], position[2]));
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_d = rotation[0]) !== null && _d !== void 0 ? _d : 0), [1, 0, 0]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_e = rotation[1]) !== null && _e !== void 0 ? _e : 0), [0, 1, 0]);
-        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_f = rotation[2]) !== null && _f !== void 0 ? _f : 0), [0, 0, 1]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_c = rotation[0]) !== null && _c !== void 0 ? _c : 0), [1, 0, 0]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_d = rotation[1]) !== null && _d !== void 0 ? _d : 0), [0, 1, 0]);
+        mat4.rotate(modelViewMatrix, modelViewMatrix, MathUtil.toRadian((_e = rotation[2]) !== null && _e !== void 0 ? _e : 0), [0, 0, 1]);
         mat4.scale(modelViewMatrix, modelViewMatrix, vec3.fromValues(scale[0], scale[1], scale[2]));
         Renderer.setPositionAttribute(gl, buffers, programInfo);
         Renderer.setTextureAttribute(gl, buffers, programInfo);
@@ -6307,7 +6826,7 @@ class EntityRenderer {
 class GuiDebugRenderer {
     static drawUi(gl, programInfo, buffers) {
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling)
+        if (DebugUtil.debugfaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -6393,7 +6912,7 @@ class GuiDebugRenderer {
 class GuiRenderer {
     static drawUi(gl, programInfo, buffers, textures) {
         gl.clearDepth(1.0);
-        if (Core.debugfaceCulling)
+        if (DebugUtil.debugfaceCulling)
             gl.enable(gl.CULL_FACE);
         else
             gl.disable(gl.CULL_FACE);
@@ -6590,6 +7109,128 @@ class GuiTextureDefine {
         this.imageSize = imageSize;
     }
 }
+class Font {
+    static init() {
+        for (let charIndex = 0; charIndex <= 255; charIndex++) {
+            const charAmountForAxis = 16;
+            const charTexPos = vec2.fromValues((charIndex % charAmountForAxis) * Font.FONT_PIXEL[0], Math.floor(charIndex / charAmountForAxis) * Font.FONT_PIXEL[1]);
+            Font.TEXTURE_POSITION_FOR_CHAR.set(String.fromCharCode(charIndex), charTexPos);
+        }
+        // register char size
+        {
+            Font.CHAR_SIZE.set(" ", 7);
+            Font.CHAR_SIZE.set("!", 3);
+            Font.CHAR_SIZE.set("\"", 4);
+            Font.CHAR_SIZE.set("#", 7);
+            Font.CHAR_SIZE.set("$", 6);
+            Font.CHAR_SIZE.set("%", 8);
+            Font.CHAR_SIZE.set("'", 2);
+            Font.CHAR_SIZE.set("(", 6);
+            Font.CHAR_SIZE.set(")", 6);
+            Font.CHAR_SIZE.set("*", 6);
+            Font.CHAR_SIZE.set("+", 8);
+            Font.CHAR_SIZE.set(",", 3);
+            Font.CHAR_SIZE.set("-", 5);
+            Font.CHAR_SIZE.set(".", 3);
+            Font.CHAR_SIZE.set("/", 5);
+            Font.CHAR_SIZE.set("0", 7);
+            Font.CHAR_SIZE.set("1", 5);
+            Font.CHAR_SIZE.set("2", 7);
+            Font.CHAR_SIZE.set("3", 6);
+            Font.CHAR_SIZE.set("4", 6);
+            Font.CHAR_SIZE.set("5", 6);
+            Font.CHAR_SIZE.set("6", 7);
+            Font.CHAR_SIZE.set("7", 6);
+            Font.CHAR_SIZE.set("8", 7);
+            Font.CHAR_SIZE.set("9", 7);
+            Font.CHAR_SIZE.set(":", 4);
+            Font.CHAR_SIZE.set(";", 4);
+            Font.CHAR_SIZE.set("<", 6);
+            Font.CHAR_SIZE.set("=", 6);
+            Font.CHAR_SIZE.set(">", 6);
+            Font.CHAR_SIZE.set("/", 5);
+            Font.CHAR_SIZE.set("@", 8);
+            Font.CHAR_SIZE.set("A", 6);
+            Font.CHAR_SIZE.set("B", 6);
+            Font.CHAR_SIZE.set("C", 6);
+            Font.CHAR_SIZE.set("D", 6);
+            Font.CHAR_SIZE.set("E", 6);
+            Font.CHAR_SIZE.set("F", 6);
+            Font.CHAR_SIZE.set("G", 6);
+            Font.CHAR_SIZE.set("H", 6);
+            Font.CHAR_SIZE.set("I", 5);
+            Font.CHAR_SIZE.set("J", 6);
+            Font.CHAR_SIZE.set("K", 6);
+            Font.CHAR_SIZE.set("L", 5);
+            Font.CHAR_SIZE.set("M", 8);
+            Font.CHAR_SIZE.set("N", 7);
+            Font.CHAR_SIZE.set("O", 8);
+            Font.CHAR_SIZE.set("P", 6);
+            Font.CHAR_SIZE.set("Q", 7);
+            Font.CHAR_SIZE.set("R", 6);
+            Font.CHAR_SIZE.set("S", 6);
+            Font.CHAR_SIZE.set("T", 6);
+            Font.CHAR_SIZE.set("U", 6);
+            Font.CHAR_SIZE.set("V", 6);
+            Font.CHAR_SIZE.set("W", 7);
+            Font.CHAR_SIZE.set("X", 7);
+            Font.CHAR_SIZE.set("Y", 7);
+            Font.CHAR_SIZE.set("Z", 6);
+            Font.CHAR_SIZE.set("[", 6);
+            Font.CHAR_SIZE.set("\\", 5);
+            Font.CHAR_SIZE.set("]", 6);
+            Font.CHAR_SIZE.set("^", 7);
+            Font.CHAR_SIZE.set("_", 5);
+            Font.CHAR_SIZE.set("`", 3);
+            Font.CHAR_SIZE.set("a", 7);
+            Font.CHAR_SIZE.set("b", 6);
+            Font.CHAR_SIZE.set("c", 6);
+            Font.CHAR_SIZE.set("d", 6);
+            Font.CHAR_SIZE.set("e", 6);
+            Font.CHAR_SIZE.set("f", 6);
+            Font.CHAR_SIZE.set("g", 6);
+            Font.CHAR_SIZE.set("h", 6);
+            Font.CHAR_SIZE.set("i", 3);
+            Font.CHAR_SIZE.set("j", 5);
+            Font.CHAR_SIZE.set("k", 5);
+            Font.CHAR_SIZE.set("l", 4);
+            Font.CHAR_SIZE.set("m", 7);
+            Font.CHAR_SIZE.set("n", 6);
+            Font.CHAR_SIZE.set("o", 6);
+            Font.CHAR_SIZE.set("p", 6);
+            Font.CHAR_SIZE.set("q", 6);
+            Font.CHAR_SIZE.set("r", 6);
+            Font.CHAR_SIZE.set("s", 6);
+            Font.CHAR_SIZE.set("t", 6);
+            Font.CHAR_SIZE.set("u", 6);
+            Font.CHAR_SIZE.set("v", 6);
+            Font.CHAR_SIZE.set("w", 7);
+            Font.CHAR_SIZE.set("x", 7);
+            Font.CHAR_SIZE.set("y", 6);
+            Font.CHAR_SIZE.set("z", 7);
+            Font.CHAR_SIZE.set("{", 6);
+            Font.CHAR_SIZE.set("|", 2);
+            Font.CHAR_SIZE.set("}", 6);
+            Font.CHAR_SIZE.set("~", 8);
+            Font.CHAR_Y_OFFSET.set("g", 1);
+            Font.CHAR_Y_OFFSET.set("j", 1);
+            Font.CHAR_Y_OFFSET.set("p", 1);
+            Font.CHAR_Y_OFFSET.set("q", 1);
+            Font.CHAR_Y_OFFSET.set("y", 1);
+        }
+    }
+}
+Font.TEXTURE_POSITION_FOR_CHAR = new Map;
+Font.CHAR_SIZE = new Map;
+Font.CHAR_Y_OFFSET = new Map;
+Font.CHAR_SIZE_DEFAULT = 8;
+Font.CHAR_SIZE_HEIGHT = 8;
+Font.FONT_PIXEL = vec2.fromValues(8, 8);
+Font.FONT_PADDING = vec2.fromValues(0, 0);
+Font.FONT_SIZE_SAKUMA = 2 / 6;
+Font.FONT_SIZE_SMALL = 4 / 6;
+Font.FONT_SIZE_MIDIUM = 6 / 6;
+Font.FONT_SIZE_LARGE = 8 / 6;
 class Gui {
     constructor() {
         this.guiUtil = new GuiUtil(this);
@@ -6610,7 +7251,7 @@ class Gui {
         this.drawRectangle(leftTopPos, drawSize, fixedTextureLeftTop, fixedTextureSize, textureColor, texture.various, verticesData);
     }
     drawRectangleSolid(leftTopPos, drawSize, textureColor, verticesData) {
-        this.drawRectangle(leftTopPos, drawSize, vec2.fromValues(0, 0), vec2.fromValues(1, 1), textureColor, _b.TEXTURE_SOLID.various, verticesData);
+        this.drawRectangle(leftTopPos, drawSize, vec2.fromValues(0, 0), vec2.fromValues(1, 1), textureColor, Gui.TEXTURE_SOLID.various, verticesData);
     }
     drawRectangle(leftTopPosBase, drawSizeBase, textureLeftTop, textureSize, textureColor, textureVarious, verticesData) {
         const offset = verticesData.position.length / 2;
@@ -6689,10 +7330,10 @@ class Gui {
         }
     }
     getCharSize(char) {
-        var _d;
+        var _c;
         if (char.length > 1)
             throw Error("Bug detected! " + "char length is over 1");
-        return (_d = _b.CHAR_SIZE.get(char)) !== null && _d !== void 0 ? _d : _b.CHAR_SIZE_DEFAULT;
+        return (_c = Font.CHAR_SIZE.get(char)) !== null && _c !== void 0 ? _c : Font.CHAR_SIZE_DEFAULT;
     }
     getDrawTextSize(originFontSize, paddingPixel = vec2.fromValues(0, 0), text) {
         return vec2.fromValues(this.getDrawTextWidth(originFontSize, paddingPixel, text), this.getDrawTextHeight(originFontSize, paddingPixel));
@@ -6705,11 +7346,11 @@ class Gui {
         return width;
     }
     getDrawTextHeight(originFontSize, paddingPixel = vec2.fromValues(0, 0)) {
-        return originFontSize * (_b.CHAR_SIZE_HEIGHT + paddingPixel[1]) * 1;
+        return originFontSize * (Font.CHAR_SIZE_HEIGHT + paddingPixel[1]) * 1;
     }
     getCharYOffset(originFontSize, char) {
-        var _d;
-        const offsetPixel = (_d = _b.CHAR_Y_OFFSET.get(char)) !== null && _d !== void 0 ? _d : 0;
+        var _c;
+        const offsetPixel = (_c = Font.CHAR_Y_OFFSET.get(char)) !== null && _c !== void 0 ? _c : 0;
         return originFontSize * offsetPixel * 1;
     }
     drawText(text, leftPos, verticesData, fontColor = Color.WHITE, fontSize = 1) {
@@ -6717,17 +7358,17 @@ class Gui {
         for (let index = 0; index < text.length; index++) {
             const char = text[index];
             const newLeftPos = vec2.fromValues(leftPos[0] + offset, leftPos[1]);
-            offset += this.getDrawTextWidth(fontSize, _b.FONT_PADDING, text[index]);
+            offset += this.getDrawTextWidth(fontSize, Font.FONT_PADDING, text[index]);
             this.drawChar(char, newLeftPos, verticesData, fontColor, fontSize);
         }
     }
     drawChar(char, leftTopPos, verticesData, fontColor = Color.WHITE, fontSize = 1) {
-        var _d;
+        var _c;
         if (char.length > 1)
             throw Error("Bug detected! " + "char length is over 1");
-        const charTexPos = (_d = _b.TEXTURE_POSITION_FOR_CHAR.get(char)) !== null && _d !== void 0 ? _d : vec2.fromValues(0, 0);
+        const charTexPos = (_c = Font.TEXTURE_POSITION_FOR_CHAR.get(char)) !== null && _c !== void 0 ? _c : vec2.fromValues(0, 0);
         leftTopPos[1] += this.getCharYOffset(fontSize, char);
-        this.drawRectangleImageSize(leftTopPos, vec2.fromValues(this.getDrawTextHeight(fontSize), this.getDrawTextHeight(fontSize)), charTexPos, _b.FONT_PIXEL, _b.TEXTURE_FONT, fontColor, verticesData);
+        this.drawRectangleImageSize(leftTopPos, vec2.fromValues(this.getDrawTextHeight(fontSize), this.getDrawTextHeight(fontSize)), charTexPos, Font.FONT_PIXEL, Gui.TEXTURE_FONT, fontColor, verticesData);
     }
     getGuiScale() {
         return this.clientIn.getGuiScale();
@@ -6746,135 +7387,13 @@ class Gui {
         const offsetedCenter = vec2.add(vec2.create(), this.getScreenCenter(), offset);
         return vec2.sub(vec2.create(), offsetedCenter, vec2Util.todiv(size, 2));
     }
-    static init() {
-        for (let charIndex = 0; charIndex <= 255; charIndex++) {
-            const charAmountForAxis = 16;
-            const charTexPos = vec2.fromValues((charIndex % charAmountForAxis) * _b.FONT_PIXEL[0], Math.floor(charIndex / charAmountForAxis) * _b.FONT_PIXEL[1]);
-            _b.TEXTURE_POSITION_FOR_CHAR.set(String.fromCharCode(charIndex), charTexPos);
-        }
-        // register char size
-        {
-            _b.CHAR_SIZE.set(" ", 7);
-            _b.CHAR_SIZE.set("!", 3);
-            _b.CHAR_SIZE.set("\"", 4);
-            _b.CHAR_SIZE.set("#", 7);
-            _b.CHAR_SIZE.set("$", 6);
-            _b.CHAR_SIZE.set("%", 8);
-            _b.CHAR_SIZE.set("'", 2);
-            _b.CHAR_SIZE.set("(", 6);
-            _b.CHAR_SIZE.set(")", 6);
-            _b.CHAR_SIZE.set("*", 6);
-            _b.CHAR_SIZE.set("+", 8);
-            _b.CHAR_SIZE.set(",", 3);
-            _b.CHAR_SIZE.set("-", 5);
-            _b.CHAR_SIZE.set(".", 3);
-            _b.CHAR_SIZE.set("/", 5);
-            _b.CHAR_SIZE.set("0", 7);
-            _b.CHAR_SIZE.set("1", 5);
-            _b.CHAR_SIZE.set("2", 7);
-            _b.CHAR_SIZE.set("3", 6);
-            _b.CHAR_SIZE.set("4", 6);
-            _b.CHAR_SIZE.set("5", 6);
-            _b.CHAR_SIZE.set("6", 7);
-            _b.CHAR_SIZE.set("7", 6);
-            _b.CHAR_SIZE.set("8", 7);
-            _b.CHAR_SIZE.set("9", 7);
-            _b.CHAR_SIZE.set(":", 4);
-            _b.CHAR_SIZE.set(";", 4);
-            _b.CHAR_SIZE.set("<", 6);
-            _b.CHAR_SIZE.set("=", 6);
-            _b.CHAR_SIZE.set(">", 6);
-            _b.CHAR_SIZE.set("/", 5);
-            _b.CHAR_SIZE.set("@", 8);
-            _b.CHAR_SIZE.set("A", 6);
-            _b.CHAR_SIZE.set("B", 6);
-            _b.CHAR_SIZE.set("C", 6);
-            _b.CHAR_SIZE.set("D", 6);
-            _b.CHAR_SIZE.set("E", 6);
-            _b.CHAR_SIZE.set("F", 6);
-            _b.CHAR_SIZE.set("G", 6);
-            _b.CHAR_SIZE.set("H", 6);
-            _b.CHAR_SIZE.set("I", 5);
-            _b.CHAR_SIZE.set("J", 6);
-            _b.CHAR_SIZE.set("K", 6);
-            _b.CHAR_SIZE.set("L", 5);
-            _b.CHAR_SIZE.set("M", 8);
-            _b.CHAR_SIZE.set("N", 7);
-            _b.CHAR_SIZE.set("O", 7);
-            _b.CHAR_SIZE.set("P", 6);
-            _b.CHAR_SIZE.set("Q", 7);
-            _b.CHAR_SIZE.set("R", 6);
-            _b.CHAR_SIZE.set("S", 6);
-            _b.CHAR_SIZE.set("T", 6);
-            _b.CHAR_SIZE.set("U", 6);
-            _b.CHAR_SIZE.set("V", 6);
-            _b.CHAR_SIZE.set("W", 7);
-            _b.CHAR_SIZE.set("X", 7);
-            _b.CHAR_SIZE.set("Y", 7);
-            _b.CHAR_SIZE.set("Z", 6);
-            _b.CHAR_SIZE.set("[", 6);
-            _b.CHAR_SIZE.set("\\", 5);
-            _b.CHAR_SIZE.set("]", 6);
-            _b.CHAR_SIZE.set("^", 7);
-            _b.CHAR_SIZE.set("_", 5);
-            _b.CHAR_SIZE.set("`", 3);
-            _b.CHAR_SIZE.set("a", 7);
-            _b.CHAR_SIZE.set("b", 6);
-            _b.CHAR_SIZE.set("c", 6);
-            _b.CHAR_SIZE.set("d", 6);
-            _b.CHAR_SIZE.set("e", 6);
-            _b.CHAR_SIZE.set("f", 6);
-            _b.CHAR_SIZE.set("g", 6);
-            _b.CHAR_SIZE.set("h", 6);
-            _b.CHAR_SIZE.set("i", 3);
-            _b.CHAR_SIZE.set("j", 5);
-            _b.CHAR_SIZE.set("k", 5);
-            _b.CHAR_SIZE.set("l", 4);
-            _b.CHAR_SIZE.set("m", 7);
-            _b.CHAR_SIZE.set("n", 6);
-            _b.CHAR_SIZE.set("o", 6);
-            _b.CHAR_SIZE.set("p", 6);
-            _b.CHAR_SIZE.set("q", 6);
-            _b.CHAR_SIZE.set("r", 6);
-            _b.CHAR_SIZE.set("s", 6);
-            _b.CHAR_SIZE.set("t", 6);
-            _b.CHAR_SIZE.set("u", 6);
-            _b.CHAR_SIZE.set("v", 6);
-            _b.CHAR_SIZE.set("w", 7);
-            _b.CHAR_SIZE.set("x", 7);
-            _b.CHAR_SIZE.set("y", 6);
-            _b.CHAR_SIZE.set("z", 7);
-            _b.CHAR_SIZE.set("{", 6);
-            _b.CHAR_SIZE.set("|", 2);
-            _b.CHAR_SIZE.set("}", 6);
-            _b.CHAR_SIZE.set("~", 8);
-            _b.CHAR_Y_OFFSET.set("g", 1);
-            _b.CHAR_Y_OFFSET.set("j", 1);
-            _b.CHAR_Y_OFFSET.set("p", 1);
-            _b.CHAR_Y_OFFSET.set("q", 1);
-            _b.CHAR_Y_OFFSET.set("y", 1);
-        }
+    tick() {
     }
 }
-_b = Gui;
 Gui.BUTTON_SPRITE = new NineSliceSprite(8, vec2.fromValues(8, 8), vec2.fromValues(0, 0));
 Gui.TEXTURE_SOLID = new GuiTextureDefine(0, vec2.fromValues(1, 1));
 Gui.TEXTURE_BG = new GuiTextureDefine(1, vec2.fromValues(256, 256));
 Gui.TEXTURE_FONT = new GuiTextureDefine(2, vec2.fromValues(128, 128));
-Gui.TEXTURE_POSITION_FOR_CHAR = new Map;
-Gui.CHAR_SIZE = new Map;
-Gui.CHAR_Y_OFFSET = new Map;
-Gui.CHAR_SIZE_DEFAULT = 8;
-Gui.CHAR_SIZE_HEIGHT = 8;
-Gui.FONT_PIXEL = vec2.fromValues(8, 8);
-Gui.FONT_PADDING = vec2.fromValues(0, 0);
-Gui.FONT_SIZE_SAKUMA = 2 / 6;
-Gui.FONT_SIZE_SMALL = 4 / 6;
-Gui.FONT_SIZE_MIDIUM = 6 / 6;
-Gui.FONT_SIZE_LARGE = 8 / 6;
-(() => {
-    _b.init();
-})();
 class GuiUtil {
     constructor(gui) {
         this.gui = gui;
@@ -6894,14 +7413,58 @@ class GuiUtil {
         for (const line of lines) {
             const newLeftPos = vec2.fromValues(leftPos[0], leftPos[1] + offset);
             this.gui.drawText(line, newLeftPos, verticesData, fontColor, fontSize);
-            offset += this.gui.getDrawTextHeight(fontSize, Gui.FONT_PADDING);
+            offset += this.gui.getDrawTextHeight(fontSize, Font.FONT_PADDING);
         }
     }
+    static init(clientIn) {
+        const hiddenInput = document.getElementById("hiddenInput");
+        if (hiddenInput instanceof HTMLInputElement == false) {
+            throw new Error("bug detected hiddenInput is not HTMLInputElement");
+        }
+        hiddenInput.addEventListener("keydown", e => {
+            const guiInput = GuiUtil.focusedGuiInput;
+            if (guiInput == null)
+                return;
+            if (e.key === "Backspace") {
+                guiInput.inputText = guiInput.inputText.slice(0, -1);
+            }
+            else if (e.key.length === 1) {
+                guiInput.inputText += e.key;
+            }
+        });
+        // IME入力の開始
+        hiddenInput.addEventListener("compositionstart", e => {
+            const guiInput = GuiUtil.focusedGuiInput;
+            if (guiInput == null)
+                return;
+            guiInput.compositionText = "";
+        });
+        // IME変換中の文字
+        hiddenInput.addEventListener("compositionupdate", e => {
+            const guiInput = GuiUtil.focusedGuiInput;
+            if (guiInput == null)
+                return;
+            guiInput.compositionText = e.data;
+        });
+        // IME確定時
+        hiddenInput.addEventListener("compositionend", e => {
+            const guiInput = GuiUtil.focusedGuiInput;
+            if (guiInput == null)
+                return;
+            guiInput.inputText += e.data;
+            guiInput.compositionText = "";
+        });
+        this.hiddenInput = hiddenInput;
+    }
+    textKeybordInput(focusedGuiInput) {
+        setTimeout(() => GuiUtil.hiddenInput.focus(), 0);
+        GuiUtil.focusedGuiInput = focusedGuiInput;
+    }
 }
+GuiUtil.BUTTON_SIZE = vec2.fromValues(80, 12);
 class GuiScreen extends Gui {
     constructor() {
         super(...arguments);
-        this.focusedComponent = null;
         this.components = [];
     }
     setupVertices(verticesData, partialTicks, cam) {
@@ -6923,13 +7486,22 @@ class GuiScreen extends Gui {
     }
     drawForeground(verticesData, partialTicks) {
     }
+    tick() {
+        for (const component of this.components) {
+            component.tick();
+        }
+    }
     onMousePressed(mousePos, event) {
+        let pressed = false;
         for (const component of this.components) {
             if (component.onMousePressed(mousePos, event)) {
-                this.focusedComponent = component;
+                pressed = true;
+                this.clientIn.focusedComponent = component;
                 this.onComponentMousePressed(component);
             }
         }
+        if (!pressed)
+            this.clientIn.focusedComponent = null;
     }
     ;
     onMouseReleased(mousePos, event) {
@@ -6986,6 +7558,7 @@ class DynamicValue {
 class GuiComponent extends Gui {
     constructor(parent, pos, size, layer = 1) {
         super();
+        this.isDisable = false;
         this.padding = 0;
         this.parent = parent;
         this.pos = new DynamicValue(pos);
@@ -7036,7 +7609,7 @@ class GuiComponent extends Gui {
     }
     ;
     isFocused() {
-        return this.parent.focusedComponent == this;
+        return this.clientIn.focusedComponent == this;
     }
     getRenderPos() {
         return vec2Util.tomul(this.pos.get(), this.getGuiScale());
@@ -7054,7 +7627,6 @@ class GuiComponent extends Gui {
 class GuiComponentButton extends GuiComponent {
     constructor(parent, pos, size, text, layer = 1) {
         super(parent, pos, size, layer);
-        this.isDisable = false;
         this.text = new DynamicValue(text);
         this.padding = 4;
     }
@@ -7071,19 +7643,47 @@ class GuiComponentButton extends GuiComponent {
         this.drawNineSlice(this.pos.get(), this.size.get(), Gui.BUTTON_SPRITE, Gui.TEXTURE_BG, undefined, verticesData);
         const centerPos = this.getCenterPos();
         const text = this.text.get();
-        const size = Gui.FONT_SIZE_MIDIUM;
+        const size = Font.FONT_SIZE_MIDIUM;
+        const textSize = this.getDrawTextSize(size, undefined, text);
+        this.drawText(text, vec2.add(vec2.create(), centerPos, vec2Util.todiv(textSize, -2)), verticesData, Color.BLACK, size);
+    }
+}
+class GuiComponentInput extends GuiComponent {
+    constructor(parent, pos, size, defaultText = "", layer = 1) {
+        super(parent, pos, size, layer);
+        this.inputText = defaultText;
+        this.compositionText = "";
+        this.padding = 4;
+    }
+    onMousePressed(mousePos, event) {
+        const isPressed = !this.isDisable && this.isInArea(mousePos);
+        if (isPressed)
+            this.guiUtil.textKeybordInput(this);
+        return isPressed;
+    }
+    onMouseReleased(mousePos, event) {
+        return this.isInArea(mousePos);
+    }
+    onMouseMoved(mousePos, event) {
+        return this.isInArea(mousePos);
+    }
+    setupVertices(verticesData, partialTicks, cam) {
+        this.drawNineSlice(this.pos.get(), this.size.get(), Gui.BUTTON_SPRITE, Gui.TEXTURE_BG, undefined, verticesData);
+        const centerPos = this.getCenterPos();
+        const text = this.inputText + this.compositionText;
+        const size = Font.FONT_SIZE_MIDIUM;
         const textSize = this.getDrawTextSize(size, undefined, text);
         this.drawText(text, vec2.add(vec2.create(), centerPos, vec2Util.todiv(textSize, -2)), verticesData, Color.BLACK, size);
     }
 }
 class GuiDebug extends GuiScreen {
     drawForeground(verticesData, partialTicks) {
-        this.drawDebug(verticesData, partialTicks);
+        this.drawDebugText(verticesData, partialTicks);
     }
-    drawDebug(verticesData, partialTicks) {
+    drawDebugText(verticesData, partialTicks) {
         const player = this.clientIn.entityPlayer;
         const serverPlayer = DebugUtil.getServerPlayer(this.clientIn);
-        const cam = this.clientIn.cam;
+        const cam = this.clientIn.camInGame;
         const camSection = new Array;
         camSection.push("Cam");
         camSection.push(`posX:${cam.pos[0].toFixed(3)}`);
@@ -7095,12 +7695,12 @@ class GuiDebug extends GuiScreen {
         playerSection.unshift("Player");
         const playerServerSection = serverPlayer == null ? [] : this.getPlayerDebugText(serverPlayer, partialTicks);
         playerServerSection.unshift("ServerPlayer");
-        this.guiUtil.drawTextLine(camSection, vec2.fromValues(0, 100), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
+        this.guiUtil.drawTextLine(camSection, vec2.fromValues(0, 100), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
         if (player != null)
-            this.guiUtil.drawTextLine(playerSection, vec2.fromValues(50, 100), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
+            this.guiUtil.drawTextLine(playerSection, vec2.fromValues(50, 100), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
         if (serverPlayer != null)
-            this.guiUtil.drawTextLine(playerServerSection, vec2.fromValues(100, 100), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
-        this.drawText("" + (player === null || player === void 0 ? void 0 : player.uuid), vec2.fromValues(50, 100 - this.getDrawTextHeight(Gui.FONT_SIZE_SAKUMA, Gui.FONT_PADDING)), verticesData, Color.WHITE, Gui.FONT_SIZE_SAKUMA);
+            this.guiUtil.drawTextLine(playerServerSection, vec2.fromValues(100, 100), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
+        this.drawText("" + (player === null || player === void 0 ? void 0 : player.uuid), vec2.fromValues(50, 100 - this.getDrawTextHeight(Font.FONT_SIZE_SAKUMA, Font.FONT_PADDING)), verticesData, Color.WHITE, Font.FONT_SIZE_SAKUMA);
     }
     getPlayerDebugText(player, partialTicks) {
         const playerSection = new Array;
@@ -7123,10 +7723,10 @@ class GuiHud extends GuiScreen {
         super.initGui(clientIn);
     }
     drawForeground(verticesData, partialTicks) {
-        if (Core.renderPerf) {
-            this.drawText(`fps:${clientFlamePerf.frameParSec}`, vec2.fromValues(0, 512), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
-            this.drawText(`tps:${clientTickPerf.frameParSec}`, vec2.fromValues(0, 544), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
-            this.drawText(`stps:${serverTickPerf.frameParSec}`, vec2.fromValues(0, 576), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
+        if (DebugUtil.debugRenderPerf || DebugUtil.debugtext) {
+            this.drawText(`fps:${clientFlamePerf.frameParSec}`, vec2.fromValues(0, 80), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
+            this.drawText(`tps:${clientTickPerf.frameParSec}`, vec2.fromValues(0, 86), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
+            this.drawText(`stps:${serverTickPerf.frameParSec}`, vec2.fromValues(0, 92), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
         }
         this.drawPlayersData(verticesData, partialTicks);
         this.drawPlayerDetail(verticesData, partialTicks);
@@ -7134,24 +7734,24 @@ class GuiHud extends GuiScreen {
     static getHealthColor(healthRadio) {
     }
     drawPlayersData(verticesData, partialTicks) {
-        var _d;
+        var _c;
         let i = 0;
         for (const [uuid, playerData] of this.clientIn.playersData.entries()) {
             // const player = this.clientIn.entities.getByUUID(uuid);
-            let userName = (_d = playerData.name) !== null && _d !== void 0 ? _d : "???";
+            let userName = (_c = playerData.name) !== null && _c !== void 0 ? _c : "???";
             const height = 10;
-            const nameHeight = this.getDrawTextHeight(Gui.FONT_SIZE_SMALL);
+            const nameHeight = this.getDrawTextHeight(Font.FONT_SIZE_SMALL);
             const healthMaxWidth = 50;
             const healthHeight = 3;
             const yPos = i * height;
             const playerName = userName + " " + playerData.health.toFixed(0);
             const playerUuid = `(${uuid})`;
-            const playerNameWidth = this.getDrawTextWidth(Gui.FONT_SIZE_MIDIUM, Gui.FONT_PADDING, playerName);
+            const playerNameWidth = this.getDrawTextWidth(Font.FONT_SIZE_MIDIUM, Font.FONT_PADDING, playerName);
             const basePos = vec2.fromValues(4, 4 + yPos);
-            this.drawText(userName, vec2Util.toadd(basePos, 1, 1), verticesData, Color.BLACK, Gui.FONT_SIZE_SMALL);
-            this.drawText(userName, vec2Util.toadd(basePos, 0, 0), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
-            if (Core.debugtext) {
-                this.drawText(playerUuid, vec2Util.toadd(basePos, playerNameWidth, 0), verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
+            this.drawText(userName, vec2Util.toadd(basePos, 1, 1), verticesData, Color.BLACK, Font.FONT_SIZE_SMALL);
+            this.drawText(userName, vec2Util.toadd(basePos, 0, 0), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
+            if (DebugUtil.debugtext) {
+                this.drawText(playerUuid, vec2Util.toadd(basePos, playerNameWidth, 0), verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
             }
             const healthWidth = playerData.health / playerData.maxHealth * healthMaxWidth;
             const healthPos = vec2Util.toadd(basePos, 0, height - healthHeight);
@@ -7181,16 +7781,20 @@ class GuiHud extends GuiScreen {
         this.drawRectangleSolid(levelPos, vec2.fromValues(xpPointMaxWidth, xpPointHeight), GuiHud.HEALTH_BACK_GROUND_COLOR, verticesData);
         this.drawRectangleSolid(levelPos, vec2.fromValues(xpPointWidth, xpPointHeight), Color.CYAN, verticesData);
         const healthTextPos = vec2Util.toadd(healthPos, healthMaxWidth, 0);
-        this.drawText(Math.ceil(player.health.get()).toFixed(0), healthTextPos, verticesData, Color.WHITE, Gui.FONT_SIZE_SMALL);
+        this.drawText(Math.ceil(player.health.get()).toFixed(0), healthTextPos, verticesData, Color.WHITE, Font.FONT_SIZE_SMALL);
         const levelTextPos = vec2Util.toadd(levelPos, xpPointMaxWidth, 0);
-        this.drawText("lv" + Math.ceil(player.xpLevel.get()).toFixed(0), levelTextPos, verticesData, Color.CYAN, Gui.FONT_SIZE_SMALL);
+        this.drawText("lv" + Math.ceil(player.xpLevel.get()).toFixed(0), levelTextPos, verticesData, Color.CYAN, Font.FONT_SIZE_SMALL);
     }
 }
 GuiHud.HEALTH_BACK_GROUND_COLOR = vec4.fromValues(1.0, 1.0, 1.0, 0.5);
 class GuiDeath extends GuiScreen {
+    constructor() {
+        super(...arguments);
+        this.ticks = 0;
+    }
     initGui(clientIn) {
         super.initGui(clientIn);
-        this.respawnButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.respawnButton, 0, 64), () => GuiTitle.BUTTON_SIZE, () => "Respawn"));
+        this.respawnButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.respawnButton, 0, 64), () => GuiUtil.BUTTON_SIZE, () => "Respawn"));
     }
     drawBackground(verticesData, partialTicks) {
         this.drawRectangleSolid(vec2.fromValues(0, 0), this.clientIn.screenSize, vec4.fromValues(1, 0, 0, 0.5), verticesData);
@@ -7200,36 +7804,49 @@ class GuiDeath extends GuiScreen {
     onComponentMousePressed(component) {
         if (component == this.respawnButton) {
             this.clientIn.send(new PacketToServerPlayerRespawn());
-            this.clientIn.openGui(null);
+            // this.clientIn.openGui(null);
         }
     }
 }
 class GuiTitle extends GuiScreen {
     initGui(clientIn) {
         super.initGui(clientIn);
-        this.singlePlayerButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.singlePlayerButton, 0, -20), () => GuiTitle.BUTTON_SIZE, () => "SinglePlayer"));
-        this.multiPlayerButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.multiPlayerButton, 0, 20), () => GuiTitle.BUTTON_SIZE, () => "MultiPlayer"));
-        this.optionButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.optionButton, 0, 60), () => GuiTitle.BUTTON_SIZE, () => "Options"));
+        this.singlePlayerButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.singlePlayerButton, 0, -20), () => GuiUtil.BUTTON_SIZE, () => "SinglePlayer"));
+        this.multiPlayerButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.multiPlayerButton, 0, 20), () => GuiUtil.BUTTON_SIZE, () => "MultiPlayer"));
+        this.optionButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.optionButton, 0, 60), () => GuiUtil.BUTTON_SIZE, () => "Options"));
+        // this.testInput = this.addComponent(new GuiComponentInput(this, vec2.fromValues(0, 0), () => GuiUtil.BUTTON_SIZE, ""));
     }
     drawBackground(verticesData, partialTicks) {
         // this.addRectangleSolid(vec2.fromValues(0, 0), this.clientIn.screenSize, vec4.fromValues(0, 0, 1, 0.5), verticesData)
     }
     drawForeground(verticesData, partialTicks) {
         const title = `Infini Dungeons`;
-        this.drawText(title, vec2.fromValues(this.getScreenCenter()[0] - this.getDrawTextWidth(Gui.FONT_SIZE_LARGE, undefined, title) / 2, 24), verticesData, Color.BLACK, Gui.FONT_SIZE_LARGE);
+        this.drawText(title, vec2.fromValues(this.getScreenCenter()[0] - this.getDrawTextWidth(Font.FONT_SIZE_LARGE, undefined, title) / 2, 24), verticesData, Color.BLACK, Font.FONT_SIZE_LARGE);
     }
     onComponentMousePressed(component) {
-        var _d;
         if (component == this.singlePlayerButton) {
             this.clientIn.offLineInit();
         }
         if (component == this.multiPlayerButton) {
-            this.clientIn.onLineInit((_d = prompt("url", `ws://localhost:8001`)) !== null && _d !== void 0 ? _d : "");
+            this.clientIn.openGui(new GuiConnect);
         }
     }
 }
-GuiTitle.BUTTON_SIZE = vec2.fromValues(80, 12);
 class GuiConnect extends GuiScreen {
+    initGui(clientIn) {
+        super.initGui(clientIn);
+        this.cancelButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.cancelButton, -50, 64), () => GuiUtil.BUTTON_SIZE, () => "Cancel"));
+        this.okButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.okButton, 50, 64), () => GuiUtil.BUTTON_SIZE, () => "Ok"));
+        this.serverUrlInput = this.addComponent(new GuiComponentInput(this, () => this.guiUtil.getButtonPos(this.serverUrlInput, 0, -20), vec2.fromValues(160, 12), "ws://localhost:8001"));
+    }
+    onComponentMousePressed(component) {
+        if (component == this.cancelButton) {
+            this.clientIn.openGui(new GuiTitle);
+        }
+        if (component == this.okButton) {
+            this.clientIn.onLineInit(this.serverUrlInput.inputText);
+        }
+    }
 }
 class GuiDisonnect extends GuiScreen {
     constructor(code, msg) {
@@ -7239,12 +7856,12 @@ class GuiDisonnect extends GuiScreen {
     }
     initGui(clientIn) {
         super.initGui(clientIn);
-        this.okButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.okButton, 0, 64), () => GuiTitle.BUTTON_SIZE, () => "Ok"));
+        this.okButton = this.addComponent(new GuiComponentButton(this, () => this.guiUtil.getButtonPos(this.okButton, 0, 64), () => GuiUtil.BUTTON_SIZE, () => "Ok"));
     }
     drawForeground(verticesData, partialTicks) {
-        this.guiUtil.drawTextCenter(`Disconnected`, vec2.fromValues(0, 16), verticesData, Color.BLACK, Gui.FONT_SIZE_LARGE, true, false);
-        this.guiUtil.drawTextCenter("code: " + this.code, vec2.fromValues(0, -16), verticesData, Color.BLACK, Gui.FONT_SIZE_MIDIUM, true, true);
-        this.guiUtil.drawTextCenter(this.msg, vec2.fromValues(0, 0), verticesData, Color.BLACK, Gui.FONT_SIZE_MIDIUM, true, true);
+        this.guiUtil.drawTextCenter(`Disconnected`, vec2.fromValues(0, 16), verticesData, Color.BLACK, Font.FONT_SIZE_LARGE, true, false);
+        this.guiUtil.drawTextCenter("code: " + this.code, vec2.fromValues(0, -16), verticesData, Color.BLACK, Font.FONT_SIZE_MIDIUM, true, true);
+        this.guiUtil.drawTextCenter(this.msg, vec2.fromValues(0, 0), verticesData, Color.BLACK, Font.FONT_SIZE_MIDIUM, true, true);
     }
     onComponentMousePressed(component) {
         if (component == this.okButton) {
@@ -7252,7 +7869,6 @@ class GuiDisonnect extends GuiScreen {
         }
     }
 }
-GuiDisonnect.BUTTON_SIZE = vec2.fromValues(500, 75);
 var Anchor;
 (function (Anchor) {
     Anchor[Anchor["LEFT"] = 0] = "LEFT";
@@ -7269,14 +7885,16 @@ class Anchors {
 }
 // #region Core
 class Core {
-    static serverInit(serverIns, clientIns) {
+    static serverInit(serverIns) {
         serverIns.onLineInit();
+        this.serverCommandInputManager = new ServerCommandInputManager(serverIns);
         if (process != null) {
-            process.on('SIGINT', () => {
+            process.on('SIGINT', () => __awaiter(this, void 0, void 0, function* () {
                 console.log('Server is shutting down...');
+                yield serverIns.savehandler.saveAll();
                 serverIns.kickAll(1000, "Server is shutting down");
                 process.exit(0);
-            });
+            }));
         }
     }
     static clientInit(clientIns) {
@@ -7288,18 +7906,63 @@ class Core {
         }
     }
 }
-Core.debugFreeCam = false;
-Core.debugtext = false;
-Core.debugGuiRect = false;
-Core.debugInteriorCulling = true;
-Core.debugfaceCulling = true;
-Core.debugDoDiscardOnDeath = true;
-Core.debugLinesRender = false;
-Core.debugPathRender = false;
-Core.debugBBRender = false;
-Core.debugEntitySpawn = true;
-Core.debugPacketLog = false;
-Core.renderPerf = true;
+Core.canPvp = false;
+class ServerCommandInputManager {
+    constructor(serverIns) {
+        this.serverIns = serverIns;
+        // rl: readline_interface;
+        this.wasClosed = false;
+        this.inputBuffer = "";
+        this.isCommandMode = false;
+        const prefix = "command> ";
+        process.stdin.setEncoding("utf8");
+        process.stdin.setRawMode(true);
+        process.stdin.resume();
+        process.stdin.on("data", (key) => {
+            const keyStr = key.toString();
+            // console.log(keyStr.codePointAt(0)?.toString(16));
+            if (keyStr === '\u0003') {
+                serverIns.shutDownServer(0);
+            }
+            if (!this.isCommandMode) {
+                if (keyStr === '/') {
+                    this.isCommandMode = true;
+                    readline.cursorTo(process.stdout, 0);
+                    readline.clearLine(process.stdout, 0);
+                    process.stdout.write(prefix);
+                }
+            }
+            else {
+                if (keyStr === '\n' || keyStr === '\r') { // enter key
+                    process.stdout.write('\n');
+                    this.runCommand(this.inputBuffer);
+                    this.inputBuffer = "";
+                    this.isCommandMode = false;
+                }
+                else if (keyStr === '\u001b') { // esc key
+                    readline.cursorTo(process.stdout, 0);
+                    readline.clearLine(process.stdout, 0);
+                    this.inputBuffer = "";
+                    this.isCommandMode = false;
+                }
+                else if (keyStr === '\u0008') { // backspace key
+                    this.inputBuffer = this.inputBuffer.slice(0, -1); // delete last char
+                    readline.cursorTo(process.stdout, 0);
+                    readline.clearLine(process.stdout, 0);
+                    process.stdout.write(prefix + this.inputBuffer); // rewrite
+                }
+                else {
+                    // add to buffer
+                    this.inputBuffer += key;
+                    process.stdout.write(key);
+                }
+            }
+        });
+    }
+    runCommand(command) {
+        this.serverIns.command(command);
+    }
+}
 class MathUtil {
     static warpDegrees(value) {
         let degree = value % 360;
@@ -7312,14 +7975,14 @@ class MathUtil {
         return degree;
     }
 }
-_c = MathUtil;
+_b = MathUtil;
 MathUtil.toRadian = (degree) => degree * (Math.PI / 180);
 MathUtil.toDegree = (radian) => radian * (180 / Math.PI);
 MathUtil.clamp = (min, value, max) => Math.max(min, Math.min(value, max));
 MathUtil.between = (min, value, max) => value >= min && value <= max;
-MathUtil.calcAngleDegrees = (x, y) => _c.toDegree(Math.atan2(y, x));
+MathUtil.calcAngleDegrees = (x, y) => _b.toDegree(Math.atan2(y, x));
 MathUtil.random = (min, max) => Math.random() * (max - min) + min;
-MathUtil.randomInt = (min, max) => Math.round(_c.random(min, max));
+MathUtil.randomInt = (min, max) => Math.round(_b.random(min, max));
 MathUtil.randomBool = () => Math.random() >= 0.5;
 MathUtil.getDistance1 = (ax, bx) => ax - bx;
 MathUtil.getDistance2 = (ax, ay, bx, by) => Math.sqrt(Math.pow(ax - bx, 2) + Math.pow(ay - by, 2));
@@ -7328,10 +7991,10 @@ MathUtil.getLength1 = (ax) => Math.sqrt(Math.pow(ax, 2));
 MathUtil.getLength2 = (ax, ay) => Math.sqrt(Math.pow(ax, 2) + Math.pow(ay, 2));
 MathUtil.getLength3 = (ax, ay, az) => Math.sqrt(Math.pow(ax, 2) + Math.pow(ay, 2) + Math.pow(az, 2));
 MathUtil.lerp = (value, min, max) => min + (max - min) * value;
-MathUtil.rotLerp = (value, min, max) => min + _c.warpDegrees(max - min) * value;
+MathUtil.rotLerp = (value, min, max) => min + _b.warpDegrees(max - min) * value;
 MathUtil.rotatedMove = (moveVel, yaw, speed = 1) => {
-    let radiansX = _c.toRadian(yaw + 90);
-    let radiansZ = _c.toRadian(yaw);
+    let radiansX = _b.toRadian(yaw + 90);
+    let radiansZ = _b.toRadian(yaw);
     let moveX = Math.sin(radiansZ) * moveVel[2] + Math.sin(radiansX) * moveVel[0];
     let moveY = moveVel[1];
     let moveZ = Math.cos(radiansZ) * moveVel[2] + Math.cos(radiansX) * moveVel[0];
@@ -7374,6 +8037,18 @@ class Util {
             });
         });
     }
+    static readUserInput(question) {
+        const readInterface = readline.createInterface({
+            input: process.stdin,
+            output: process.stdout
+        });
+        return new Promise((resolve, reject) => {
+            readInterface.question(question, (answer) => {
+                readInterface.close();
+                resolve(answer);
+            });
+        });
+    }
 }
 Util.getSorterEntityDistanceBy = (source) => (a, b) => MathUtil.getDistance3(source.pos[0], source.pos[1], source.pos[2], a.pos[0], a.pos[1], a.pos[2]) - MathUtil.getDistance3(source.pos[0], source.pos[1], source.pos[2], b.pos[0], b.pos[1], b.pos[2]);
 Util.vec3ArrayToFloat32Array = (vec3Array) => new Float32Array(vec3Array.flatMap(vec3 => [vec3[0], vec3[1], vec3[2]]));
@@ -7381,6 +8056,46 @@ Util.vec2ArrayToFloat32Array = (vec2Array) => new Float32Array(vec2Array.flatMap
 Util.vec3ArrayToArray = (vec3Array) => vec3Array.flatMap(vec3 => [vec3[0], vec3[1], vec3[2]]);
 Util.vec2ArrayToArray = (vec2Array) => vec2Array.flatMap(vec2 => [vec2[0], vec2[1]]);
 Util.stringInsert = (string, insert, at) => string.slice(0, at) + insert + string.slice(at);
+class UUIDUtil {
+    static sha1(input) {
+        return __awaiter(this, void 0, void 0, function* () {
+            // const encoder = new TextEncoder();
+            // const data = encoder.encode(input);
+            const hashBuffer = yield crypto.subtle.digest("SHA-1", input);
+            return new Uint8Array(hashBuffer);
+        });
+    }
+    static bytesToUUID(bytes) {
+        return [
+            this.bytesToHex(bytes.subarray(0, 4)),
+            this.bytesToHex(bytes.subarray(4, 6)),
+            this.bytesToHex(bytes.subarray(6, 8)).replace(/^(.)./, "5$1"), // UUID v5 にする
+            this.bytesToHex(bytes.subarray(8, 10)).replace(/^(.)./, "8$1"), // Variant にする
+            this.bytesToHex(bytes.subarray(10, 16))
+        ].join("-");
+    }
+    static bytesToHex(bytes) {
+        return Array.from(bytes).map(b => b.toString(16).padStart(2, "0")).join("");
+    }
+    static generateUUIDFromString(name_1) {
+        return __awaiter(this, arguments, void 0, function* (name, namespace = "6ba7b810-9dad-11d1-80b4-00c04fd430c8") {
+            const namespaceBytes = this.hexToBytes(namespace.replace(/-/g, ""));
+            const nameBytes = new TextEncoder().encode(name);
+            const combined = new Uint8Array(namespaceBytes.length + nameBytes.length);
+            combined.set(namespaceBytes);
+            combined.set(nameBytes, namespaceBytes.length);
+            const hash = yield this.sha1(combined);
+            return this.bytesToUUID(hash);
+        });
+    }
+    static hexToBytes(hex) {
+        const bytes = new Uint8Array(hex.length / 2);
+        for (let i = 0; i < hex.length; i += 2) {
+            bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+        }
+        return bytes;
+    }
+}
 class DataViewUtil {
     static writeString(view, offset, str) {
         const encoder = new TextEncoder();
@@ -7489,26 +8204,54 @@ class DebugUtil {
     static getServerPlayer(clientIn) {
         if (!clientIn.isOffline)
             return null;
+        if (clientIn.entityPlayer == null)
+            return null;
         const playerUuid = clientIn.entityPlayer.uuid;
         const entity = clientIn.integratedServer.entities.getByUUID(playerUuid);
         if (entity instanceof EntityPlayerServer)
             return entity;
         return null;
     }
+    static debugSpawnEnemy(entityClass, ...args) {
+        if (sr == null) {
+            console.warn("server for debug is null");
+            return;
+        }
+        const player = cl === null || cl === void 0 ? void 0 : cl.entityPlayer;
+        if (player == null) {
+            console.warn("client player is null");
+            return;
+        }
+        const entity = new entityClass(sr);
+        entity.setPos3(player.pos);
+        entity.spawn();
+    }
 }
+DebugUtil.debugRenderPerf = false;
+DebugUtil.debugFreeCam = false;
+DebugUtil.debugtext = false;
+DebugUtil.debugGuiRect = false;
+DebugUtil.debugInteriorCulling = true;
+DebugUtil.debugfaceCulling = true;
+DebugUtil.debugDoDiscardOnDeath = true;
+DebugUtil.debugLinesRender = false;
+DebugUtil.debugPathRender = false;
+DebugUtil.debugBBRender = false;
+DebugUtil.debugEntitySpawn = true;
+DebugUtil.debugPacketLog = false;
 var FinalizationRegistry; // 型定義
-var finalizationRegistry;
+var finalizationRegIn;
 var finalizationRegistryID = new Map;
 function debugRegisterFinalization(obj, name) {
-    var _d;
+    var _c;
     if (typeof FinalizationRegistry !== 'undefined') {
-        if (finalizationRegistry == null) {
-            finalizationRegistry = new FinalizationRegistry((id) => {
+        if (finalizationRegIn == null) {
+            finalizationRegIn = new FinalizationRegistry((id) => {
                 console.log(`${id} was gabage collected`);
             });
         }
-        const id = (_d = finalizationRegistryID.get(name)) !== null && _d !== void 0 ? _d : 0;
-        finalizationRegistry.register(obj, name + "_" + id);
+        const id = (_c = finalizationRegistryID.get(name)) !== null && _c !== void 0 ? _c : 0;
+        finalizationRegIn.register(obj, name + "_" + id);
         finalizationRegistryID.set(name, id + 1);
     }
 }
@@ -7523,18 +8266,23 @@ function objMap(object, callbackFnc) {
 }
 let sr;
 let cl;
-{
-    //init
+//init
+try {
     PacketHandler.initPacket();
     if (isDedicatedServer) {
         const serverIns = new DedicatedServer;
-        Core.serverInit(serverIns, undefined);
+        Core.serverInit(serverIns);
         sr = serverIns;
     }
     else {
+        Font.init();
         const clientIns = new Client;
         Core.clientInit(clientIns);
         cl = clientIns;
     }
+}
+catch (e) {
+    console.error("Failed to init");
+    console.trace(e);
 }
 //# sourceMappingURL=script.js.map
